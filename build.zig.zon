@@ -1,0 +1,17 @@
+.{
+    .name = .pico_sdk,
+    .version = "2.2.0",
+    .fingerprint = 0x5c7605290022f064,
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE.TXT",
+        "README.md",
+        "src",
+        "lib",
+        "zig",
+        "doc",
+    },
+}
