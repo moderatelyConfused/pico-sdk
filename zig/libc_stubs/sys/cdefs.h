@@ -23,6 +23,19 @@
 #define __has_builtin(x) 0
 #endif
 
+// Token concatenation macros (needed for PICO_DEFAULT_TIMER_INSTANCE on RP2350)
+#ifndef __CONCAT1
+#define __CONCAT1(x,y) x ## y
+#endif
+#ifndef __CONCAT
+#define __CONCAT(x,y) __CONCAT1(x,y)
+#endif
+
+// String conversion macro
+#ifndef __STRING
+#define __STRING(x) #x
+#endif
+
 // GCC/Clang inline attributes
 #ifndef __always_inline
 #define __always_inline __attribute__((__always_inline__)) inline

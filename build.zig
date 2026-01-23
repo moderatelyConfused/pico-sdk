@@ -681,8 +681,14 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         .hardware_irq => &.{
             "src/rp2_common/hardware_irq/irq.c",
         },
-        .hardware_sync => &.{
-            "src/rp2_common/hardware_sync/sync.c",
+        .hardware_sync => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/hardware_sync/sync.c",
+            },
+            .rp2350 => &.{
+                "src/rp2_common/hardware_sync/sync.c",
+                "src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
+            },
         },
         .hardware_timer => &.{
             "src/rp2_common/hardware_timer/timer.c",
