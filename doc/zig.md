@@ -26,11 +26,11 @@ Create a `build.zig.zon`:
     .minimum_zig_version = "0.15.0",
     .dependencies = .{
         .pico_sdk = .{
-            .url = "git+https://github.com/raspberrypi/pico-sdk#master",
+            .url = "git+https://github.com/moderatelyConfused/pico-sdk#master",
             .hash = "...",  // zig build will tell you the correct hash
         },
         .picotool = .{
-            .url = "git+https://github.com/raspberrypi/picotool#master",
+            .url = "git+https://github.com/moderatelyConfused/picotool#master",
             .hash = "...",  // Optional: for upload support
         },
     },
@@ -45,8 +45,8 @@ Create a `build.zig.zon`:
 Or fetch with:
 
 ```bash
-zig fetch --save git+https://github.com/raspberrypi/pico-sdk
-zig fetch --save git+https://github.com/raspberrypi/picotool  # Optional
+zig fetch --save git+https://github.com/moderatelyConfused/pico-sdk
+zig fetch --save git+https://github.com/moderatelyConfused/picotool  # Optional
 ```
 
 ### 3. Create your build.zig
@@ -136,7 +136,9 @@ pub fn build(b: *std.Build) void {
 }
 ```
 
-### 4. Create your main.zig
+### 4. Create your application code
+
+#### For Zig projects (main.zig)
 
 ```zig
 const c = @cImport({
@@ -161,6 +163,29 @@ export fn main() callconv(.c) c_int {
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     _ = msg;
     while (true) {}
+}
+```
+
+#### For C projects (main.c)
+
+```c
+#include "hardware/gpio.h"
+#include "hardware/timer.h"
+
+#define LED_PIN 25
+
+int main(void) {
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, true);  // true = output
+
+    while (1) {
+        gpio_put(LED_PIN, true);
+        busy_wait_us(500000);  // 500ms
+        gpio_put(LED_PIN, false);
+        busy_wait_us(500000);
+    }
+
+    return 0;
 }
 ```
 
@@ -446,6 +471,117 @@ Then:
 zig build                      # Build ELF and UF2
 zig build upload -Dchip=rp2040 # Upload to connected Pico
 ```
+
+## C Project Example
+
+For C projects, the build.zig is similar but uses `addCSourceFiles` instead of a Zig root source file:
+
+```zig
+const std = @import("std");
+const pico_sdk = @import("pico_sdk");
+
+pub fn build(b: *std.Build) void {
+    const chip: pico_sdk.Chip = b.option(pico_sdk.Chip, "chip", "Target chip") orelse .rp2040;
+    const board = b.option([]const u8, "board", "Target board") orelse "pico";
+
+    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, .arm));
+    const optimize = b.standardOptimizeOption(.{});
+
+    const sdk_dep = b.dependency("pico_sdk", .{});
+
+    // SDK library
+    const sdk_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "pico_sdk_runtime",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    pico_sdk.addTo(sdk_dep, sdk_lib, chip, board);
+    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, &.{
+        .pico_crt0,
+        .pico_platform,
+        .pico_runtime,
+        .hardware_gpio,
+        .hardware_clocks,
+        .hardware_pll,
+        .hardware_xosc,
+        .hardware_watchdog,
+        .hardware_irq,
+        .hardware_sync,
+        .hardware_timer,
+        .hardware_ticks,
+    });
+
+    // Executable (no root_source_file for C projects)
+    const exe = b.addExecutable(.{
+        .name = "blinky",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    exe.entry = .{ .symbol_name = "_entry_point" };
+    exe.linkLibrary(sdk_lib);
+
+    pico_sdk.addTo(sdk_dep, exe, chip, board);
+    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+        .pico_runtime_init,
+        .pico_clib_minimal,
+    });
+
+    // Add C source files
+    exe.addCSourceFiles(.{
+        .files = &.{"src/main.c"},
+        .flags = &.{
+            "-std=c11",
+            "-ffreestanding",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-D__always_inline=__attribute__((__always_inline__)) inline",
+            "-D__printflike(a,b)=__attribute__((__format__(__printf__,a,b)))",
+            "-Dstatic_assert=_Static_assert",
+        },
+    });
+
+    pico_sdk.setLinkerScript(sdk_dep, exe, chip, null);
+
+    if (chip == .rp2040) {
+        pico_sdk.addBoot2(sdk_dep, exe, .boot2_w25q080);
+    }
+
+    b.installArtifact(exe);
+
+    // UF2 and upload steps (same as Zig example)
+    const picotool_dep = b.dependency("picotool", .{});
+    const picotool_exe = picotool_dep.artifact("picotool");
+
+    const uf2_cmd = b.addRunArtifact(picotool_exe);
+    uf2_cmd.addArgs(&.{ "uf2", "convert", "-t", "elf" });
+    uf2_cmd.addFileArg(exe.getEmittedBin());
+    const uf2_output = uf2_cmd.addOutputFileArg("blinky.uf2");
+    uf2_cmd.step.dependOn(&exe.step);
+
+    const install_uf2 = b.addInstallBinFile(uf2_output, "blinky.uf2");
+    b.getInstallStep().dependOn(&install_uf2.step);
+
+    const upload_cmd = b.addRunArtifact(picotool_exe);
+    upload_cmd.addArgs(&.{ "load", "-x", "-t", "elf" });
+    upload_cmd.addFileArg(exe.getEmittedBin());
+    upload_cmd.step.dependOn(&exe.step);
+
+    const upload_step = b.step("upload", "Upload firmware to connected Pico");
+    upload_step.dependOn(&upload_cmd.step);
+}
+```
+
+The key differences for C projects:
+- No `root_source_file` in the executable's module
+- Use `exe.addCSourceFiles()` to add your C source files
+- The C compiler flags handle SDK header compatibility
 
 ## Build Options
 
