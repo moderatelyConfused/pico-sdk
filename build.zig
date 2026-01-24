@@ -663,8 +663,14 @@ pub fn addComponents(
 
 fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
     return switch (component) {
-        .hardware_gpio => &.{
-            "src/rp2_common/hardware_gpio/gpio.c",
+        .hardware_gpio => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/hardware_gpio/gpio.c",
+            },
+            .rp2350 => &.{
+                "src/rp2_common/hardware_gpio/gpio.c",
+                "zig/gpio_coproc_wrappers.c",
+            },
         },
         .hardware_clocks => &.{
             "src/rp2_common/hardware_clocks/clocks.c",
