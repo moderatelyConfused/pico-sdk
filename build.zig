@@ -1082,7 +1082,10 @@ fn addSdkIncludePaths(sdk_dep: *std.Build.Dependency, compile: *std.Build.Step.C
     }
 
     // TinyUSB includes (for USB support)
-    compile.addSystemIncludePath(sdk_dep.path("lib/tinyusb/src"));
+    // Get TinyUSB from dependency rather than submodule
+    if (sdk_dep.builder.lazyDependency("tinyusb", .{})) |tinyusb_dep| {
+        compile.addSystemIncludePath(tinyusb_dep.path("src"));
+    }
     compile.addSystemIncludePath(sdk_dep.path("src/rp2_common/tinyusb/include"));
     compile.addSystemIncludePath(sdk_dep.path("src/rp2_common/pico_fix/rp2040_usb_device_enumeration/include"));
 }
@@ -1346,8 +1349,10 @@ pub fn addTinyUSB(
         .root_module = mod,
     });
 
-    // TinyUSB source path within pico-sdk
-    const tinyusb_src = sdk_dep.path("lib/tinyusb/src");
+    // Get TinyUSB from pico-sdk's dependencies
+    const tinyusb_dep = b.lazyDependency("tinyusb", .{}) orelse
+        @panic("tinyusb dependency not available - ensure pico-sdk was fetched correctly");
+    const tinyusb_src = tinyusb_dep.path("src");
 
     // Define the MCU - both RP2040 and RP2350 use the same USB controller
     lib.root_module.addCMacro("CFG_TUSB_MCU", "OPT_MCU_RP2040");

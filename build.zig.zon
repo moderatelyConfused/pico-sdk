@@ -4,11 +4,10 @@
     .fingerprint = 0x5c7605290022f064,
     .minimum_zig_version = "0.13.0",
     .dependencies = .{
-        // Optional: TinyUSB for USB support
-        // Uncomment and update the path/URL when tinyusb-zig is available
-        // .tinyusb = .{
-        //     .path = "../tinyusb-zig",
-        // },
+        .tinyusb = .{
+            .url = "git+https://github.com/hathach/tinyusb#86ad6e56c1700e85f1c5678607a762cfe3aa2f47",
+            .hash = "N-V-__8AAGUZ_gDYqxEdexw7Rfp9YENlWbwlDPQu0bCfKxws",
+        },
     },
     .paths = .{
         "build.zig",
@@ -16,7 +15,6 @@
         "LICENSE.TXT",
         "README.md",
         "src",
-        "lib",
         "zig",
         "doc",
     },
