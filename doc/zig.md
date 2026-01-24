@@ -246,8 +246,8 @@ pub const Component = enum {
     hardware_divider,
     hardware_interp,
     hardware_exception,
-    hardware_resets,
-    hardware_rtc,       // RP2040 only
+    hardware_resets,        // Header-only
+    hardware_rtc,           // RP2040 only
     hardware_vreg,
     hardware_xip_cache,
 
@@ -260,14 +260,47 @@ pub const Component = enum {
     pico_clib_minimal,
 
     // Standard I/O
-    pico_stdio,
+    pico_stdio,             // Note: requires linker wrapping
     pico_stdio_uart,
     pico_stdio_semihosting,
 
     // Multicore
     pico_multicore,
+
+    // Math and utility libraries
+    pico_printf,            // Note: requires linker wrapping
+    pico_malloc,            // Note: requires linker wrapping
+    pico_float,             // Note: requires linker wrapping
+    pico_double,            // Note: requires linker wrapping
+    pico_divider,           // Note: requires linker wrapping (RP2040)
+    pico_int64_ops,         // RP2040 only, requires linker wrapping
+    pico_bit_ops,           // Note: requires linker wrapping
+    pico_mem_ops,           // RP2040 only, requires linker wrapping
+    pico_rand,
+    pico_unique_id,
+    pico_bootrom,
+    pico_atomic,
+    pico_sync,
+    pico_stdlib,
 };
 ```
+
+**Linker Wrapping Support:** Some components (marked above) require symbol wrapping to function properly. Use `setLinkerScriptWithWrapping()` instead of `setLinkerScript()` to enable this:
+
+```zig
+// Enable wrapping for stdio and printf
+pico_sdk.setLinkerScriptWithWrapping(sdk_dep, exe, chip, null, &.{
+    .pico_stdio,
+    .pico_printf,
+});
+
+// Also add the required compile definitions
+pico_sdk.addWrappingDefinitions(exe, &.{ .pico_stdio, .pico_printf });
+```
+
+This generates linker script symbol aliases (e.g., `printf = __wrap_printf;`) that redirect standard library calls to SDK implementations.
+
+**Note:** `pico_malloc` wrapping is not supported as it requires an actual malloc implementation from a libc. For memory allocation, use Zig's allocator or link against a libc.
 
 #### `Boot2`
 ```zig
@@ -384,6 +417,65 @@ pub fn addCSourceFiles(
 ) void
 ```
 Low-level function to add specific SDK source files by path. Prefer `addComponents` for most use cases.
+
+#### `getLinkerWrapSymbols`
+```zig
+pub fn getLinkerWrapSymbols(chip: Chip, component: Component) []const []const u8
+```
+Returns the list of function names that need linker wrapping for a component. Use this to see which functions would need `--wrap=<func>` linker flags for full functionality.
+
+**Example:**
+```zig
+const wrap_symbols = pico_sdk.getLinkerWrapSymbols(.rp2040, .pico_stdio);
+// Returns: "printf", "vprintf", "puts", "putchar", "getchar"
+```
+
+#### `componentRequiresWrapping`
+```zig
+pub fn componentRequiresWrapping(component: Component) bool
+```
+Returns true if a component requires linker wrapping to function properly.
+
+**Example:**
+```zig
+if (pico_sdk.componentRequiresWrapping(.pico_printf)) {
+    // This component needs wrapping for full functionality
+}
+```
+
+#### `setLinkerScriptWithWrapping`
+```zig
+pub fn setLinkerScriptWithWrapping(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    chip: Chip,
+    flash_size_bytes: ?usize,
+    wrapped_components: []const Component,
+) void
+```
+Sets the linker script with symbol wrapping support. This generates symbol aliases in the linker script that redirect standard library calls to SDK implementations (e.g., `printf = __wrap_printf;`).
+
+**Example:**
+```zig
+pico_sdk.setLinkerScriptWithWrapping(sdk_dep, exe, chip, null, &.{
+    .pico_stdio,
+    .pico_printf,
+    .pico_float,
+});
+```
+
+#### `addWrappingDefinitions`
+```zig
+pub fn addWrappingDefinitions(compile: *std.Build.Step.Compile, components: []const Component) void
+```
+Adds compile definitions required for wrapped components to work correctly. Call this when using `setLinkerScriptWithWrapping`.
+
+This sets up defines like `LIB_PICO_PRINTF_PICO=1` so that pico_stdio uses the SDK's printf implementation instead of trying to call through to `__real_vprintf`.
+
+**Example:**
+```zig
+pico_sdk.addWrappingDefinitions(exe, &.{ .pico_stdio, .pico_printf });
+```
 
 ## Complete Example
 

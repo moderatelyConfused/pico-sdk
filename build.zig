@@ -383,19 +383,82 @@ pub fn setLinkerScript(
     };
 
     // Use custom step to replace INCLUDE directive with actual flash region
-    const transform_step = LinkerScriptTransform.create(b, sdk_linker_script, flash_size);
+    // Pass empty symbol_aliases for basic linker script without wrapping
+    const empty_aliases: []const SymbolAlias = &.{};
+    const transform_step = LinkerScriptTransform.create(b, sdk_linker_script, flash_size, empty_aliases);
     compile.setLinkerScript(transform_step.getOutput());
 }
 
-/// Custom build step that transforms a linker script by replacing the
-/// INCLUDE "pico_flash_region.ld" directive with the actual flash region content.
+/// Sets the linker script with symbol wrapping support.
+/// This enables pico_stdio, pico_printf, pico_float, etc. to intercept standard library calls.
+/// Use this instead of setLinkerScript when you need wrapping functionality.
+///
+/// wrapped_components: Components that need their symbols wrapped (e.g., .pico_stdio, .pico_printf)
+///
+/// Note: pico_malloc wrapping is not supported as it requires an actual malloc implementation.
+/// For malloc, either use Zig's allocator or link against a libc that provides malloc.
+pub fn setLinkerScriptWithWrapping(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    chip: Chip,
+    flash_size_bytes: ?usize,
+    wrapped_components: []const Component,
+) void {
+    const b = compile.step.owner;
+
+    const default_flash_size: usize = switch (chip) {
+        .rp2040 => 2 * 1024 * 1024,
+        .rp2350 => 4 * 1024 * 1024,
+    };
+    const flash_size = flash_size_bytes orelse default_flash_size;
+
+    const sdk_linker_script = switch (chip) {
+        .rp2040 => sdk_dep.path("src/rp2_common/pico_crt0/rp2040/memmap_default.ld"),
+        .rp2350 => sdk_dep.path("src/rp2_common/pico_crt0/rp2350/memmap_default.ld"),
+    };
+
+    // Collect all symbol aliases
+    var symbol_aliases = std.ArrayList(SymbolAlias).initCapacity(b.allocator, 64) catch @panic("OOM");
+    for (wrapped_components) |component| {
+        const aliases = getComponentSymbolAliases(component);
+        for (aliases) |alias| {
+            symbol_aliases.append(b.allocator, alias) catch @panic("OOM");
+        }
+    }
+
+    const transform_step = LinkerScriptTransform.create(
+        b,
+        sdk_linker_script,
+        flash_size,
+        symbol_aliases.toOwnedSlice(b.allocator) catch @panic("OOM"),
+    );
+    compile.setLinkerScript(transform_step.getOutput());
+}
+
+/// Represents a linker symbol alias: public_name = target_name
+const SymbolAlias = struct {
+    /// The public symbol name (e.g., "printf")
+    name: []const u8,
+    /// The target symbol to alias to (e.g., "stdio_printf" or "__wrap_printf")
+    target: []const u8,
+};
+
+/// Custom build step that transforms a linker script by:
+/// 1. Replacing the INCLUDE "pico_flash_region.ld" directive with actual flash region
+/// 2. Adding symbol aliases for wrapped functions (e.g., printf = stdio_printf)
 const LinkerScriptTransform = struct {
     step: std.Build.Step,
     input: std.Build.LazyPath,
     output: std.Build.GeneratedFile,
     flash_size: usize,
+    symbol_aliases: []const SymbolAlias,
 
-    fn create(b: *std.Build, input: std.Build.LazyPath, flash_size: usize) *LinkerScriptTransform {
+    fn create(
+        b: *std.Build,
+        input: std.Build.LazyPath,
+        flash_size: usize,
+        symbol_aliases: []const SymbolAlias,
+    ) *LinkerScriptTransform {
         const self = b.allocator.create(LinkerScriptTransform) catch @panic("OOM");
         self.* = .{
             .step = std.Build.Step.init(.{
@@ -407,6 +470,7 @@ const LinkerScriptTransform = struct {
             .input = input,
             .output = .{ .step = &self.step },
             .flash_size = flash_size,
+            .symbol_aliases = symbol_aliases,
         };
         input.addStepDependencies(&self.step);
         return self;
@@ -430,18 +494,32 @@ const LinkerScriptTransform = struct {
         const flash_region = b.fmt("    FLASH(rx) : ORIGIN = 0x10000000, LENGTH = {d}\n", .{self.flash_size});
 
         // Replace the INCLUDE line with the flash region
-        // The INCLUDE directive looks like: INCLUDE "pico_flash_region.ld"
-        var result = std.ArrayList(u8).initCapacity(b.allocator, content.len) catch @panic("OOM");
+        var result = std.ArrayList(u8).initCapacity(b.allocator, content.len + 4096) catch @panic("OOM");
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {
             if (std.mem.indexOf(u8, line, "INCLUDE") != null and
                 std.mem.indexOf(u8, line, "pico_flash_region.ld") != null)
             {
-                // Replace with flash region content
                 result.appendSlice(b.allocator, flash_region) catch @panic("OOM");
             } else {
                 result.appendSlice(b.allocator, line) catch @panic("OOM");
                 result.append(b.allocator, '\n') catch @panic("OOM");
+            }
+        }
+
+        // Add symbol aliases at the end of the linker script
+        // These redirect calls from standard names to SDK implementations
+        if (self.symbol_aliases.len > 0) {
+            result.appendSlice(b.allocator,
+                \\
+                \\/* Symbol wrapping - redirect standard library calls to SDK implementations */
+                \\
+            ) catch @panic("OOM");
+
+            for (self.symbol_aliases) |alias| {
+                // name = target;
+                const alias_line = b.fmt("{s} = {s};\n", .{ alias.name, alias.target });
+                result.appendSlice(b.allocator, alias_line) catch @panic("OOM");
             }
         }
 
@@ -1097,6 +1175,22 @@ pub const Component = enum {
 
     // Multicore
     pico_multicore,
+
+    // Phase 2: Math and utility libraries
+    pico_printf,
+    pico_malloc,
+    pico_float,
+    pico_double,
+    pico_divider,
+    pico_int64_ops,
+    pico_bit_ops,
+    pico_mem_ops,
+    pico_rand,
+    pico_unique_id,
+    pico_bootrom,
+    pico_atomic,
+    pico_sync,
+    pico_stdlib,
 };
 
 /// Add SDK components to a compile step. This is the recommended way to use the SDK.
@@ -1152,6 +1246,293 @@ pub fn addComponentsArm(
     components: []const Component,
 ) void {
     addComponents(sdk_dep, compile, chip, .arm, components);
+}
+
+/// Get the list of functions that need linker wrapping for a component.
+/// Some SDK components require wrapping standard library functions via --wrap=<func>.
+/// Returns a slice of function names that should be wrapped.
+///
+/// Note: Zig's build system doesn't expose a direct API to add arbitrary linker flags.
+/// To use components that require wrapping (pico_stdio, pico_printf, pico_malloc, pico_float, pico_double),
+/// you may need to either:
+/// 1. Not use those components and let the compiler provide default implementations
+/// 2. Use a custom linker script that defines the wrapped symbols
+/// 3. Build with CMake/Bazel for full wrapping support
+pub fn getLinkerWrapSymbols(chip: Chip, component: Component) []const []const u8 {
+    return getComponentWrapFlags(chip, component);
+}
+
+/// Check if a component requires linker wrapping to function properly
+pub fn componentRequiresWrapping(component: Component) bool {
+    return switch (component) {
+        .pico_stdio, .pico_printf, .pico_malloc, .pico_divider, .pico_bit_ops, .pico_mem_ops, .pico_int64_ops, .pico_float, .pico_double => true,
+        else => false,
+    };
+}
+
+/// Add compile definitions required for wrapped components to work correctly.
+/// Call this on your compile step when using setLinkerScriptWithWrapping.
+///
+/// This sets up defines like LIB_PICO_PRINTF_PICO so that pico_stdio uses the SDK's
+/// printf implementation instead of trying to call through to __real_vprintf.
+pub fn addWrappingDefinitions(compile: *std.Build.Step.Compile, components: []const Component) void {
+    for (components) |component| {
+        switch (component) {
+            .pico_printf => {
+                // Tell pico_stdio to use SDK's printf (vfctprintf) instead of __real_vprintf
+                compile.root_module.addCMacro("LIB_PICO_PRINTF_PICO", "1");
+            },
+            .pico_stdio => {
+                // Disable short-circuit mode because it uses __attribute__((alias(...)))
+                // which doesn't work with Zig's C compiler. Instead, we use linker script
+                // aliases to redirect printf/etc. to stdio_* functions directly.
+                compile.root_module.addCMacro("PICO_STDIO_SHORT_CIRCUIT_CLIB_FUNCS", "0");
+            },
+            else => {},
+        }
+    }
+}
+
+/// Get symbol aliases for a component.
+/// For pico_stdio, aliases point directly to stdio_* functions to avoid
+/// the __wrap_*/__real_* indirection that requires --wrap linker flags.
+/// For other components, aliases point to __wrap_* functions.
+fn getComponentSymbolAliases(component: Component) []const SymbolAlias {
+    return switch (component) {
+        // pico_stdio: alias directly to stdio_* implementations
+        // This avoids the __attribute__((alias(...))) issue with PICO_STDIO_SHORT_CIRCUIT_CLIB_FUNCS
+        // Also provide __real_* aliases for the __wrap_* functions that call them
+        .pico_stdio => &.{
+            // Public API aliases
+            .{ .name = "printf", .target = "stdio_printf" },
+            .{ .name = "vprintf", .target = "stdio_vprintf" },
+            .{ .name = "puts", .target = "stdio_puts" },
+            .{ .name = "putchar", .target = "stdio_putchar" },
+            .{ .name = "getchar", .target = "stdio_getchar" },
+            // __real_* aliases for the __wrap_* wrapper functions
+            .{ .name = "__real_printf", .target = "stdio_printf" },
+            .{ .name = "__real_vprintf", .target = "stdio_vprintf" },
+            .{ .name = "__real_puts", .target = "stdio_puts" },
+            .{ .name = "__real_putchar", .target = "stdio_putchar" },
+            .{ .name = "__real_getchar", .target = "stdio_getchar" },
+        },
+        // pico_printf: alias to __wrap_* functions
+        .pico_printf => &.{
+            .{ .name = "sprintf", .target = "__wrap_sprintf" },
+            .{ .name = "snprintf", .target = "__wrap_snprintf" },
+            .{ .name = "vsnprintf", .target = "__wrap_vsnprintf" },
+        },
+        // pico_malloc: not supported (requires actual allocator implementation)
+        .pico_malloc => &.{},
+        // Most other components: TODO - add as needed
+        else => &.{},
+    };
+}
+
+/// Legacy function for compatibility - returns symbol names that need wrapping.
+/// Use getComponentSymbolAliases for linker script generation.
+fn getComponentWrapFlags(chip: Chip, component: Component) []const []const u8 {
+    return switch (component) {
+        .pico_stdio => &.{
+            "printf",
+            "vprintf",
+            "puts",
+            "putchar",
+            "getchar",
+        },
+        .pico_printf => &.{
+            "sprintf",
+            "snprintf",
+            "vsnprintf",
+        },
+        .pico_malloc => &.{
+            "malloc",
+            "calloc",
+            "realloc",
+            "free",
+        },
+        .pico_divider => switch (chip) {
+            .rp2040 => &.{
+                "__aeabi_idiv",
+                "__aeabi_idivmod",
+                "__aeabi_ldivmod",
+                "__aeabi_uidiv",
+                "__aeabi_uidivmod",
+                "__aeabi_uldivmod",
+            },
+            .rp2350 => &.{}, // RP2350 uses compiler implementation
+        },
+        .pico_bit_ops => switch (chip) {
+            .rp2040 => &.{
+                "__clzsi2",
+                "__clzdi2",
+                "__ctzsi2",
+                "__ctzdi2",
+                "__popcountsi2",
+                "__popcountdi2",
+                "__clz",
+                "__clzl",
+                "__clzll",
+            },
+            .rp2350 => &.{
+                "__ctzdi2", // Only this one is wrapped on RP2350
+            },
+        },
+        .pico_mem_ops => switch (chip) {
+            .rp2040 => &.{
+                "memcpy",
+                "memset",
+                "__aeabi_memcpy",
+                "__aeabi_memset",
+                "__aeabi_memcpy4",
+                "__aeabi_memset4",
+                "__aeabi_memcpy8",
+                "__aeabi_memset8",
+            },
+            .rp2350 => &.{}, // RP2350 uses compiler implementation
+        },
+        .pico_int64_ops => switch (chip) {
+            .rp2040 => &.{
+                "__aeabi_lmul",
+            },
+            .rp2350 => &.{},
+        },
+        .pico_float => &.{
+            // AEABI arithmetic
+            "__aeabi_fadd",
+            "__aeabi_fdiv",
+            "__aeabi_fmul",
+            "__aeabi_frsub",
+            "__aeabi_fsub",
+            // AEABI compare
+            "__aeabi_cfcmpeq",
+            "__aeabi_cfrcmple",
+            "__aeabi_cfcmple",
+            "__aeabi_fcmpeq",
+            "__aeabi_fcmplt",
+            "__aeabi_fcmple",
+            "__aeabi_fcmpge",
+            "__aeabi_fcmpgt",
+            "__aeabi_fcmpun",
+            // AEABI conversions
+            "__aeabi_i2f",
+            "__aeabi_ui2f",
+            "__aeabi_f2iz",
+            "__aeabi_f2uiz",
+            "__aeabi_l2f",
+            "__aeabi_ul2f",
+            "__aeabi_f2lz",
+            "__aeabi_f2ulz",
+            "__aeabi_f2d",
+            // Math functions
+            "sqrtf",
+            "cosf",
+            "sinf",
+            "tanf",
+            "atan2f",
+            "expf",
+            "logf",
+            "ldexpf",
+            "copysignf",
+            "truncf",
+            "floorf",
+            "ceilf",
+            "roundf",
+            "sincosf",
+            "asinf",
+            "acosf",
+            "atanf",
+            "sinhf",
+            "coshf",
+            "tanhf",
+            "asinhf",
+            "acoshf",
+            "atanhf",
+            "exp2f",
+            "log2f",
+            "exp10f",
+            "log10f",
+            "powf",
+            "powintf",
+            "hypotf",
+            "cbrtf",
+            "fmodf",
+            "dremf",
+            "remainderf",
+            "remquof",
+            "expm1f",
+            "log1pf",
+            "fmaf",
+        },
+        .pico_double => &.{
+            // AEABI arithmetic
+            "__aeabi_dadd",
+            "__aeabi_ddiv",
+            "__aeabi_dmul",
+            "__aeabi_drsub",
+            "__aeabi_dsub",
+            // AEABI compare
+            "__aeabi_cdcmpeq",
+            "__aeabi_cdrcmple",
+            "__aeabi_cdcmple",
+            "__aeabi_dcmpeq",
+            "__aeabi_dcmplt",
+            "__aeabi_dcmple",
+            "__aeabi_dcmpge",
+            "__aeabi_dcmpgt",
+            "__aeabi_dcmpun",
+            // AEABI conversions
+            "__aeabi_i2d",
+            "__aeabi_l2d",
+            "__aeabi_ui2d",
+            "__aeabi_ul2d",
+            "__aeabi_d2iz",
+            "__aeabi_d2lz",
+            "__aeabi_d2uiz",
+            "__aeabi_d2ulz",
+            "__aeabi_d2f",
+            // Math functions
+            "sqrt",
+            "cos",
+            "sin",
+            "tan",
+            "atan2",
+            "exp",
+            "log",
+            "ldexp",
+            "copysign",
+            "trunc",
+            "floor",
+            "ceil",
+            "round",
+            "sincos",
+            "asin",
+            "acos",
+            "atan",
+            "sinh",
+            "cosh",
+            "tanh",
+            "asinh",
+            "acosh",
+            "atanh",
+            "exp2",
+            "log2",
+            "exp10",
+            "log10",
+            "pow",
+            "powint",
+            "hypot",
+            "cbrt",
+            "fmod",
+            "drem",
+            "remainder",
+            "remquo",
+            "expm1",
+            "log1p",
+            "fma",
+        },
+        else => &.{}, // Most components don't need wrapping
+    };
 }
 
 fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []const []const u8 {
@@ -1334,6 +1715,96 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
                     // RISC-V may need additional files
                 },
             },
+        },
+
+        // Phase 2: Math and utility libraries
+        .pico_printf => &.{
+            "src/rp2_common/pico_printf/printf.c",
+        },
+        .pico_malloc => &.{
+            "src/rp2_common/pico_malloc/malloc.c",
+        },
+        .pico_float => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_float/float_aeabi_rp2040.S",
+                "src/rp2_common/pico_float/float_init_rom_rp2040.c",
+                "src/rp2_common/pico_float/float_math.c",
+                "src/rp2_common/pico_float/float_v1_rom_shim_rp2040.S",
+            },
+            .rp2350 => switch (cpu_arch) {
+                .arm => &.{
+                    "src/rp2_common/pico_float/float_math.c",
+                    "src/rp2_common/pico_float/float_conv32_vfp.S",
+                    "src/rp2_common/pico_float/float_common_m33.S",
+                    "src/rp2_common/pico_float/float_sci_m33_vfp.S",
+                },
+                .riscv => &.{
+                    "src/rp2_common/pico_float/float_single_hazard3.S",
+                },
+            },
+        },
+        .pico_double => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_double/double_aeabi_rp2040.S",
+                "src/rp2_common/pico_double/double_init_rom_rp2040.c",
+                "src/rp2_common/pico_double/double_math.c",
+                "src/rp2_common/pico_double/double_v1_rom_shim_rp2040.S",
+            },
+            .rp2350 => switch (cpu_arch) {
+                .arm => &.{
+                    "src/rp2_common/pico_double/double_math.c",
+                    "src/rp2_common/pico_double/double_aeabi_dcp.S",
+                    "src/rp2_common/pico_double/double_fma_dcp.S",
+                    "src/rp2_common/pico_double/double_sci_m33.S",
+                    "src/rp2_common/pico_double/double_conv_m33.S",
+                },
+                .riscv => &.{}, // RISC-V uses compiler default
+            },
+        },
+        .pico_divider => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_divider/divider_hardware.S",
+            },
+            .rp2350 => &.{
+                "src/rp2_common/pico_divider/divider_compiler.c",
+            },
+        },
+        .pico_int64_ops => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_int64_ops/pico_int64_ops_aeabi.S",
+            },
+            .rp2350 => &.{}, // RP2350 uses compiler default
+        },
+        .pico_bit_ops => &.{
+            "src/rp2_common/pico_bit_ops/bit_ops_aeabi.S",
+        },
+        .pico_mem_ops => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_mem_ops/mem_ops_aeabi.S",
+            },
+            .rp2350 => &.{}, // RP2350 uses compiler default
+        },
+        .pico_rand => &.{
+            "src/rp2_common/pico_rand/rand.c",
+        },
+        .pico_unique_id => &.{
+            "src/rp2_common/pico_unique_id/unique_id.c",
+        },
+        .pico_bootrom => &.{
+            "src/rp2_common/pico_bootrom/bootrom.c",
+            "src/rp2_common/pico_bootrom/bootrom_lock.c",
+        },
+        .pico_atomic => &.{
+            "src/rp2_common/pico_atomic/atomic.c",
+        },
+        .pico_sync => &.{
+            "src/common/pico_sync/lock_core.c",
+            "src/common/pico_sync/sem.c",
+            "src/common/pico_sync/mutex.c",
+            "src/common/pico_sync/critical_section.c",
+        },
+        .pico_stdlib => &.{
+            "src/rp2_common/pico_stdlib/stdlib.c",
         },
     };
 }
