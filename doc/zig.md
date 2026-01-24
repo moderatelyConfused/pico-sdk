@@ -282,6 +282,12 @@ pub const Component = enum {
     pico_atomic,
     pico_sync,
     pico_stdlib,
+
+    // RP2350-specific components
+    hardware_sha256,        // RP2350 only
+    hardware_powman,        // RP2350 only
+    hardware_boot_lock,     // RP2350 only
+    pico_sha256,            // RP2350 only
 };
 ```
 

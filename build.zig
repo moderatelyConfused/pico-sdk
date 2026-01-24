@@ -1191,6 +1191,12 @@ pub const Component = enum {
     pico_atomic,
     pico_sync,
     pico_stdlib,
+
+    // Phase 3: RP2350-specific components
+    hardware_sha256,
+    hardware_powman,
+    hardware_boot_lock,
+    pico_sha256,
 };
 
 /// Add SDK components to a compile step. This is the recommended way to use the SDK.
@@ -1805,6 +1811,32 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
         },
         .pico_stdlib => &.{
             "src/rp2_common/pico_stdlib/stdlib.c",
+        },
+
+        // Phase 3: RP2350-specific components
+        .hardware_sha256 => switch (chip) {
+            .rp2040 => &.{}, // Not available on RP2040
+            .rp2350 => &.{
+                "src/rp2_common/hardware_sha256/sha256.c",
+            },
+        },
+        .hardware_powman => switch (chip) {
+            .rp2040 => &.{}, // Not available on RP2040
+            .rp2350 => &.{
+                "src/rp2_common/hardware_powman/powman.c",
+            },
+        },
+        .hardware_boot_lock => switch (chip) {
+            .rp2040 => &.{}, // Not available on RP2040
+            .rp2350 => &.{
+                "src/rp2_common/hardware_boot_lock/boot_lock.c",
+            },
+        },
+        .pico_sha256 => switch (chip) {
+            .rp2040 => &.{}, // Not available on RP2040
+            .rp2350 => &.{
+                "src/rp2_common/pico_sha256/sha256.c",
+            },
         },
     };
 }
