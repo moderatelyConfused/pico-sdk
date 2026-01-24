@@ -711,9 +711,7 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         .hardware_i2c => &.{
             "src/rp2_common/hardware_i2c/i2c.c",
         },
-        .hardware_pwm => &.{
-            "src/rp2_common/hardware_pwm/pwm.c",
-        },
+        .hardware_pwm => &.{}, // Header-only component
         .hardware_adc => &.{
             "src/rp2_common/hardware_adc/adc.c",
         },
@@ -731,11 +729,13 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
                 "src/rp2040/pico_platform/platform.c",
                 "src/rp2_common/pico_platform_common/common.c",
                 "src/rp2_common/pico_platform_panic/panic.c",
+                "zig/platform_wrappers.c",
             },
             .rp2350 => &.{
                 "src/rp2350/pico_platform/platform.c",
                 "src/rp2_common/pico_platform_common/common.c",
                 "src/rp2_common/pico_platform_panic/panic.c",
+                "zig/platform_wrappers.c",
             },
         },
         .pico_runtime => &.{
