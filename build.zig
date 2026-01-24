@@ -358,6 +358,451 @@ pub fn getTarget(chip: Chip, cpu_arch: CpuArch) std.Target.Query {
     };
 }
 
+/// Sets the linker script for proper Pico memory layout.
+/// This is required for the binary to run on actual hardware.
+/// flash_size_bytes: Optional flash size in bytes. Defaults to 2MB for RP2040, 4MB for RP2350.
+pub fn setLinkerScript(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    chip: Chip,
+    flash_size_bytes: ?usize,
+) void {
+    const b = compile.step.owner;
+
+    // Default flash sizes per chip (same as CMake/Bazel)
+    const default_flash_size: usize = switch (chip) {
+        .rp2040 => 2 * 1024 * 1024, // 2MB
+        .rp2350 => 4 * 1024 * 1024, // 4MB
+    };
+    const flash_size = flash_size_bytes orelse default_flash_size;
+
+    // SDK's linker script path
+    const sdk_linker_script = switch (chip) {
+        .rp2040 => sdk_dep.path("src/rp2_common/pico_crt0/rp2040/memmap_default.ld"),
+        .rp2350 => sdk_dep.path("src/rp2_common/pico_crt0/rp2350/memmap_default.ld"),
+    };
+
+    // Use custom step to replace INCLUDE directive with actual flash region
+    const transform_step = LinkerScriptTransform.create(b, sdk_linker_script, flash_size);
+    compile.setLinkerScript(transform_step.getOutput());
+}
+
+/// Custom build step that transforms a linker script by replacing the
+/// INCLUDE "pico_flash_region.ld" directive with the actual flash region content.
+const LinkerScriptTransform = struct {
+    step: std.Build.Step,
+    input: std.Build.LazyPath,
+    output: std.Build.GeneratedFile,
+    flash_size: usize,
+
+    fn create(b: *std.Build, input: std.Build.LazyPath, flash_size: usize) *LinkerScriptTransform {
+        const self = b.allocator.create(LinkerScriptTransform) catch @panic("OOM");
+        self.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "transform linker script",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .input = input,
+            .output = .{ .step = &self.step },
+            .flash_size = flash_size,
+        };
+        input.addStepDependencies(&self.step);
+        return self;
+    }
+
+    fn getOutput(self: *LinkerScriptTransform) std.Build.LazyPath {
+        return .{ .generated = .{ .file = &self.output } };
+    }
+
+    fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+        const self: *LinkerScriptTransform = @fieldParentPtr("step", step);
+        const b = step.owner;
+
+        // Read the input linker script
+        const input_path = self.input.getPath2(b, step);
+        const content = std.fs.cwd().readFileAlloc(b.allocator, input_path, 64 * 1024) catch |err| {
+            return step.fail("failed to read linker script '{s}': {s}", .{ input_path, @errorName(err) });
+        };
+
+        // Generate the flash region line
+        const flash_region = b.fmt("    FLASH(rx) : ORIGIN = 0x10000000, LENGTH = {d}\n", .{self.flash_size});
+
+        // Replace the INCLUDE line with the flash region
+        // The INCLUDE directive looks like: INCLUDE "pico_flash_region.ld"
+        var result = std.ArrayList(u8).initCapacity(b.allocator, content.len) catch @panic("OOM");
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.indexOf(u8, line, "INCLUDE") != null and
+                std.mem.indexOf(u8, line, "pico_flash_region.ld") != null)
+            {
+                // Replace with flash region content
+                result.appendSlice(b.allocator, flash_region) catch @panic("OOM");
+            } else {
+                result.appendSlice(b.allocator, line) catch @panic("OOM");
+                result.append(b.allocator, '\n') catch @panic("OOM");
+            }
+        }
+
+        // Write to cache
+        const cache_path = b.cache_root.join(b.allocator, &.{"memmap.ld"}) catch @panic("OOM");
+        const cache_dir = std.fs.path.dirname(cache_path) orelse ".";
+        std.fs.cwd().makePath(cache_dir) catch {};
+        std.fs.cwd().writeFile(.{ .sub_path = cache_path, .data = result.items }) catch |err| {
+            return step.fail("failed to write linker script: {s}", .{@errorName(err)});
+        };
+
+        self.output.path = cache_path;
+    }
+};
+
+/// Generate minimal headers for boot2 compilation.
+/// Boot2 assembly includes pico/asm_helper.S which normally pulls in the full SDK header chain.
+/// We generate minimal stubs to avoid the complex dependency chain.
+fn generateBoot2Headers(b: *std.Build) std.Build.LazyPath {
+    const wf = b.addWriteFiles();
+
+    // Minimal pico.h that just provides what asm_helper.S needs
+    _ = wf.add("pico.h",
+        \\// Minimal pico.h for boot2 assembly
+        \\#ifndef _PICO_H
+        \\#define _PICO_H
+        \\// Boot2 doesn't need the full pico.h content
+        \\#endif
+        \\
+    );
+
+    // Minimal asm_helper.S with just the macros needed for boot2
+    _ = wf.add("pico/asm_helper.S",
+        \\// Minimal asm_helper.S for boot2
+        \\
+        \\.macro pico_default_asm_setup
+        \\.syntax unified
+        \\.cpu cortex-m0plus
+        \\.thumb
+        \\.endm
+        \\
+        \\.macro regular_func x
+        \\.global \x
+        \\.type \x,%function
+        \\.thumb_func
+        \\\x:
+        \\.endm
+        \\
+        \\.macro regular_func_with_section x
+        \\.section .text.\x
+        \\regular_func \x
+        \\.endm
+        \\
+    );
+
+    return wf.getDirectory();
+}
+
+/// Boot2 variants available for RP2040
+pub const Boot2 = enum {
+    boot2_w25q080, // Default for most Pico boards (W25Q16JV flash)
+    boot2_generic_03h, // Generic 03h read command (slowest, most compatible)
+    boot2_at25sf128a,
+    boot2_is25lp080,
+    boot2_w25x10cl,
+};
+
+/// Adds the boot2 second-stage bootloader for RP2040.
+/// This is required for RP2040 to boot from flash.
+/// Call this for RP2040 builds only - RP2350 does not need boot2.
+pub fn addBoot2(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    boot2_variant: Boot2,
+) void {
+    const b = compile.step.owner;
+
+    // Get the boot2 source file
+    const boot2_source = switch (boot2_variant) {
+        .boot2_w25q080 => "src/rp2040/boot_stage2/boot2_w25q080.S",
+        .boot2_generic_03h => "src/rp2040/boot_stage2/boot2_generic_03h.S",
+        .boot2_at25sf128a => "src/rp2040/boot_stage2/boot2_at25sf128a.S",
+        .boot2_is25lp080 => "src/rp2040/boot_stage2/boot2_is25lp080.S",
+        .boot2_w25x10cl => "src/rp2040/boot_stage2/boot2_w25x10cl.S",
+    };
+
+    // Create an executable for boot2 with its special linker script
+    const boot2_exe = b.addExecutable(.{
+        .name = "boot2",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .thumb,
+                .cpu_model = .{ .explicit = &std.Target.arm.cpu.cortex_m0plus },
+                .os_tag = .freestanding,
+                .abi = .eabi,
+            }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+
+    // Add the boot2 assembly source
+    boot2_exe.addAssemblyFile(sdk_dep.path(boot2_source));
+
+    // Generate minimal headers for boot2 (avoids pulling in full SDK header chain)
+    const boot2_headers = generateBoot2Headers(b);
+    boot2_exe.addIncludePath(boot2_headers);
+
+    // Add necessary include paths for the boot2 assembly
+    boot2_exe.addSystemIncludePath(sdk_dep.path("src/rp2040/boot_stage2/asminclude"));
+    boot2_exe.addSystemIncludePath(sdk_dep.path("src/rp2040/boot_stage2/include"));
+    boot2_exe.addSystemIncludePath(sdk_dep.path("src/rp2040/hardware_regs/include"));
+
+    // Use the boot_stage2 linker script
+    boot2_exe.setLinkerScript(sdk_dep.path("src/rp2040/boot_stage2/boot_stage2.ld"));
+
+    // Set the entry point
+    boot2_exe.entry = .{ .symbol_name = "_stage2_boot" };
+
+    // Create a custom step to pad and checksum the boot2 binary
+    const boot2_transform = Boot2Transform.create(b, boot2_exe.getEmittedBin());
+
+    // Add the generated checksummed boot2 assembly to the main compile
+    compile.addAssemblyFile(boot2_transform.getOutput());
+}
+
+/// Custom build step that pads and checksums boot2 binary
+const Boot2Transform = struct {
+    step: std.Build.Step,
+    input: std.Build.LazyPath,
+    output: std.Build.GeneratedFile,
+
+    fn create(b: *std.Build, input: std.Build.LazyPath) *Boot2Transform {
+        const self = b.allocator.create(Boot2Transform) catch @panic("OOM");
+        self.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "pad and checksum boot2",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .input = input,
+            .output = .{ .step = &self.step },
+        };
+        input.addStepDependencies(&self.step);
+        return self;
+    }
+
+    fn getOutput(self: *Boot2Transform) std.Build.LazyPath {
+        return .{ .generated = .{ .file = &self.output } };
+    }
+
+    fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+        const self: *Boot2Transform = @fieldParentPtr("step", step);
+        const b = step.owner;
+
+        // Read the boot2 ELF binary
+        const input_path = self.input.getPath2(b, step);
+
+        // Read the .text section from the ELF
+        // For simplicity, we'll read the raw binary output
+        // The boot2 linker script places everything at a fixed address
+        const elf_data = std.fs.cwd().readFileAlloc(b.allocator, input_path, 64 * 1024) catch |err| {
+            return step.fail("failed to read boot2 binary '{s}': {s}", .{ input_path, @errorName(err) });
+        };
+
+        // Parse ELF to extract the loadable segment
+        const binary_data = extractElfText(b.allocator, elf_data) catch |err| {
+            return step.fail("failed to extract boot2 text: {s}", .{@errorName(err)});
+        };
+
+        if (binary_data.len > 252) {
+            return step.fail("boot2 code too large: {d} bytes (max 252)", .{binary_data.len});
+        }
+
+        // Pad to 252 bytes
+        var padded: [252]u8 = [_]u8{0} ** 252;
+        @memcpy(padded[0..binary_data.len], binary_data);
+
+        // Calculate CRC32 with bit reversal (matching pad_checksum script)
+        const checksum = calculateBoot2Checksum(&padded);
+
+        // Generate assembly output
+        var output = std.ArrayList(u8).initCapacity(b.allocator, 4096) catch @panic("OOM");
+        const writer = output.writer(b.allocator);
+
+        try writer.writeAll("// Padded and checksummed boot2\n\n");
+        try writer.writeAll(".cpu cortex-m0plus\n");
+        try writer.writeAll(".thumb\n\n");
+        try writer.writeAll(".section .boot2, \"ax\"\n\n");
+
+        // Write bytes in groups of 16
+        var i: usize = 0;
+        while (i < 252) : (i += 16) {
+            try writer.writeAll(".byte ");
+            var j: usize = 0;
+            while (j < 16 and i + j < 252) : (j += 1) {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.print("0x{x:0>2}", .{padded[i + j]});
+            }
+            try writer.writeAll("\n");
+        }
+
+        // Write the 4-byte checksum
+        try writer.print(".byte 0x{x:0>2}, 0x{x:0>2}, 0x{x:0>2}, 0x{x:0>2}\n", .{
+            @as(u8, @truncate(checksum)),
+            @as(u8, @truncate(checksum >> 8)),
+            @as(u8, @truncate(checksum >> 16)),
+            @as(u8, @truncate(checksum >> 24)),
+        });
+
+        // Write to cache
+        const cache_path = b.cache_root.join(b.allocator, &.{"boot2_checksummed.S"}) catch @panic("OOM");
+        const cache_dir = std.fs.path.dirname(cache_path) orelse ".";
+        std.fs.cwd().makePath(cache_dir) catch {};
+        std.fs.cwd().writeFile(.{ .sub_path = cache_path, .data = output.items }) catch |err| {
+            return step.fail("failed to write boot2 assembly: {s}", .{@errorName(err)});
+        };
+
+        self.output.path = cache_path;
+    }
+
+    fn extractElfText(allocator: std.mem.Allocator, elf_data: []const u8) ![]const u8 {
+        // Parse ELF to extract the code at boot2 address (0x20041f00)
+        if (elf_data.len < 52) return error.InvalidElf;
+        if (!std.mem.eql(u8, elf_data[0..4], "\x7fELF")) return error.InvalidElf;
+
+        // 32-bit ELF header fields
+        const e_phoff = std.mem.readInt(u32, elf_data[28..32], .little);
+        const e_shoff = std.mem.readInt(u32, elf_data[32..36], .little);
+        const e_phentsize = std.mem.readInt(u16, elf_data[42..44], .little);
+        const e_phnum = std.mem.readInt(u16, elf_data[44..46], .little);
+        const e_shentsize = std.mem.readInt(u16, elf_data[46..48], .little);
+        const e_shnum = std.mem.readInt(u16, elf_data[48..50], .little);
+
+        // Boot2 is loaded at 0x20041f00
+        const boot2_addr: u32 = 0x20041f00;
+
+        // First try: Find PT_LOAD segment at boot2 address
+        var i: usize = 0;
+        while (i < e_phnum) : (i += 1) {
+            const ph_offset = e_phoff + i * e_phentsize;
+            if (ph_offset + 32 > elf_data.len) continue;
+
+            const p_type = std.mem.readInt(u32, elf_data[ph_offset..][0..4], .little);
+            if (p_type == 1) { // PT_LOAD
+                const p_offset = std.mem.readInt(u32, elf_data[ph_offset + 4 ..][0..4], .little);
+                const p_vaddr = std.mem.readInt(u32, elf_data[ph_offset + 8 ..][0..4], .little);
+                const p_filesz = std.mem.readInt(u32, elf_data[ph_offset + 16 ..][0..4], .little);
+
+                // Check if this segment is at or contains the boot2 address
+                if (p_vaddr == boot2_addr or (p_vaddr <= boot2_addr and p_vaddr + p_filesz > boot2_addr)) {
+                    if (p_offset + p_filesz > elf_data.len) return error.InvalidElf;
+                    const result = allocator.alloc(u8, p_filesz) catch return error.OutOfMemory;
+                    @memcpy(result, elf_data[p_offset..][0..p_filesz]);
+                    return result;
+                }
+            }
+        }
+
+        // Fallback: Look for .text section
+        if (e_shoff > 0 and e_shnum > 0) {
+            // Get section header string table index
+            const e_shstrndx = std.mem.readInt(u16, elf_data[50..52], .little);
+            if (e_shstrndx < e_shnum) {
+                const shstrtab_off = e_shoff + e_shstrndx * e_shentsize;
+                if (shstrtab_off + 40 <= elf_data.len) {
+                    const shstrtab_offset = std.mem.readInt(u32, elf_data[shstrtab_off + 16 ..][0..4], .little);
+
+                    // Iterate sections looking for .text
+                    var s: usize = 0;
+                    while (s < e_shnum) : (s += 1) {
+                        const sh_offset = e_shoff + s * e_shentsize;
+                        if (sh_offset + 40 > elf_data.len) continue;
+
+                        const sh_name_off = std.mem.readInt(u32, elf_data[sh_offset..][0..4], .little);
+                        const sh_type = std.mem.readInt(u32, elf_data[sh_offset + 4 ..][0..4], .little);
+                        const sh_off = std.mem.readInt(u32, elf_data[sh_offset + 16 ..][0..4], .little);
+                        const sh_size = std.mem.readInt(u32, elf_data[sh_offset + 20 ..][0..4], .little);
+
+                        // SHT_PROGBITS = 1
+                        if (sh_type == 1 and sh_size > 0) {
+                            const name_start = shstrtab_offset + sh_name_off;
+                            if (name_start + 5 <= elf_data.len) {
+                                if (std.mem.eql(u8, elf_data[name_start..][0..5], ".text")) {
+                                    if (sh_off + sh_size <= elf_data.len) {
+                                        const result = allocator.alloc(u8, sh_size) catch return error.OutOfMemory;
+                                        @memcpy(result, elf_data[sh_off..][0..sh_size]);
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return error.NoLoadSegment;
+    }
+
+    fn calculateBoot2Checksum(data: *const [252]u8) u32 {
+        // CRC32 with bit reversal, matching the pad_checksum Python script
+        // The bootrom uses a slightly unusual CRC32 variant
+
+        // Bit reverse a byte
+        const bitrev8 = struct {
+            fn f(x: u8) u8 {
+                var result: u8 = 0;
+                var val = x;
+                var i: u3 = 0;
+                while (true) {
+                    result = (result << 1) | (val & 1);
+                    val >>= 1;
+                    if (i == 7) break;
+                    i += 1;
+                }
+                return result;
+            }
+        }.f;
+
+        // Bit reverse a 32-bit value
+        const bitrev32 = struct {
+            fn f(x: u32) u32 {
+                var result: u32 = 0;
+                var val = x;
+                var i: u5 = 0;
+                while (true) {
+                    result = (result << 1) | (val & 1);
+                    val >>= 1;
+                    if (i == 31) break;
+                    i += 1;
+                }
+                return result;
+            }
+        }.f;
+
+        // Standard CRC32 polynomial (reflected)
+        const polynomial: u32 = 0xEDB88320;
+
+        // Calculate CRC32 on bit-reversed input bytes
+        // The pad_checksum script does: bitrev32((crc32(bitrev_bytes, 0) ^ 0xffffffff))
+        // Since crc32 already does final XOR, and then we XOR again, they cancel out.
+        // So we compute CRC32 without the final XOR, then bit-reverse.
+        var crc: u32 = 0xFFFFFFFF; // Standard CRC32 initial value
+        for (data) |byte| {
+            const rev_byte = bitrev8(byte);
+            crc ^= @as(u32, rev_byte);
+            for (0..8) |_| {
+                if (crc & 1 != 0) {
+                    crc = (crc >> 1) ^ polynomial;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+
+        // No final XOR - the two XORs in pad_checksum cancel out
+        return bitrev32(crc);
+    }
+};
+
 /// Adds all pico-sdk include paths and compile definitions to a compile step.
 /// Call this from your project's build.zig to set up the SDK.
 pub fn addTo(sdk_dep: *std.Build.Dependency, compile: *std.Build.Step.Compile, chip: Chip, board: []const u8) void {
@@ -599,7 +1044,7 @@ pub fn addCSourceFiles(
 }
 
 const sdk_c_flags: []const []const u8 = &.{
-    "-std=c11",
+    "-std=gnu11",
     "-ffunction-sections",
     "-fdata-sections",
     "-fno-strict-aliasing",
@@ -630,6 +1075,10 @@ pub const Component = enum {
     hardware_flash,
     pico_platform,
     pico_runtime,
+    pico_runtime_init,
+    pico_crt0,
+    pico_time,
+    pico_clib_minimal,
 };
 
 /// Add SDK components to a compile step. This is the recommended way to use the SDK.
@@ -687,14 +1136,9 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         .hardware_irq => &.{
             "src/rp2_common/hardware_irq/irq.c",
         },
-        .hardware_sync => switch (chip) {
-            .rp2040 => &.{
-                "src/rp2_common/hardware_sync/sync.c",
-            },
-            .rp2350 => &.{
-                "src/rp2_common/hardware_sync/sync.c",
-                "src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
-            },
+        .hardware_sync => &.{
+            "src/rp2_common/hardware_sync/sync.c",
+            "src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
         },
         .hardware_timer => &.{
             "src/rp2_common/hardware_timer/timer.c",
@@ -740,6 +1184,28 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         },
         .pico_runtime => &.{
             "src/common/hardware_claim/claim.c",
+            "src/rp2_common/pico_runtime/runtime.c",
+        },
+        .pico_runtime_init => &.{
+            "src/rp2_common/pico_runtime_init/runtime_init.c",
+            "src/rp2_common/pico_runtime_init/runtime_init_clocks.c",
+            "src/rp2_common/pico_bootrom/bootrom.c",
+            "src/rp2_common/hardware_vreg/vreg.c",
+        },
+        .pico_crt0 => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_crt0/crt0.S",
+            },
+            .rp2350 => &.{
+                "src/rp2_common/pico_crt0/crt0.S",
+            },
+        },
+        .pico_time => &.{
+            "src/common/pico_time/time.c",
+            "src/common/pico_time/timeout_helper.c",
+        },
+        .pico_clib_minimal => &.{
+            "src/rp2_common/pico_clib_interface/minimal_interface.c",
         },
     };
 }
