@@ -16,15 +16,24 @@ my-project/
 
 ### 2. Add pico-sdk as a dependency
 
-Create a minimal `build.zig.zon`:
+Create a `build.zig.zon`:
 
 ```zig
 .{
-    .name = .my_project,
+    .name = "my_project",
     .version = "0.1.0",
     .fingerprint = 0x0,  // Zig will tell you the correct value on first build
-    .minimum_zig_version = "0.15.2",
-    .dependencies = .{},
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{
+        .pico_sdk = .{
+            .url = "git+https://github.com/raspberrypi/pico-sdk#master",
+            .hash = "...",  // zig build will tell you the correct hash
+        },
+        .picotool = .{
+            .url = "git+https://github.com/raspberrypi/picotool#master",
+            .hash = "...",  // Optional: for upload support
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -33,13 +42,12 @@ Create a minimal `build.zig.zon`:
 }
 ```
 
-Then fetch the pico-sdk dependency:
+Or fetch with:
 
 ```bash
-zig fetch --save git+https://github.com/moderatelyConfused/pico-sdk
+zig fetch --save git+https://github.com/raspberrypi/pico-sdk
+zig fetch --save git+https://github.com/raspberrypi/picotool  # Optional
 ```
-
-This automatically adds the dependency with the correct hash to your `build.zig.zon`.
 
 ### 3. Create your build.zig
 
@@ -59,43 +67,114 @@ pub fn build(b: *std.Build) void {
     // Get the pico-sdk dependency
     const sdk_dep = b.dependency("pico_sdk", .{});
 
-    // Create executable
-    const exe = b.addExecutable(.{
-        .name = "my_app",
+    // Create a static library from SDK C sources
+    const sdk_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "pico_sdk_runtime",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
 
-    // Add SDK includes and compile definitions
-    pico_sdk.addTo(sdk_dep, exe, chip, board);
+    // Add SDK includes and definitions
+    pico_sdk.addTo(sdk_dep, sdk_lib, chip, board);
 
-    // Add SDK components you need
-    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+    // Add SDK components
+    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, &.{
+        .pico_crt0,
         .pico_platform,
         .pico_runtime,
         .hardware_gpio,
+        .hardware_clocks,
+        .hardware_pll,
+        .hardware_xosc,
+        .hardware_watchdog,
+        .hardware_irq,
+        .hardware_sync,
+        .hardware_timer,
+        .hardware_ticks,
     });
 
-    b.installArtifact(exe);
+    // Create the executable
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.stack_protector = false;  // Required for freestanding
 
-    // Generate .bin file for flashing
-    const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .bin });
-    bin.step.dependOn(&exe.step);
-    const install_bin = b.addInstallBinFile(bin.getOutput(), "my_app.bin");
-    b.getInstallStep().dependOn(&install_bin.step);
+    const exe = b.addExecutable(.{
+        .name = "my_app",
+        .root_module = mod,
+    });
+
+    // Use CRT0's entry point
+    exe.entry = .{ .symbol_name = "_entry_point" };
+
+    // Link the SDK library
+    exe.linkLibrary(sdk_lib);
+
+    // Add SDK includes for @cImport
+    pico_sdk.addTo(sdk_dep, exe, chip, board);
+
+    // Add runtime init and minimal C library (linked directly to exe)
+    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+        .pico_runtime_init,
+        .pico_clib_minimal,
+    });
+
+    // Set linker script for proper memory layout
+    pico_sdk.setLinkerScript(sdk_dep, exe, chip, null);
+
+    // Add boot2 for RP2040 (required for flash boot)
+    if (chip == .rp2040) {
+        pico_sdk.addBoot2(sdk_dep, exe, .boot2_w25q080);
+    }
+
+    b.installArtifact(exe);
 }
 ```
 
-### 4. Build
+### 4. Create your main.zig
 
-```bash
-zig build
+```zig
+const c = @cImport({
+    @cInclude("hardware/gpio.h");
+    @cInclude("hardware/timer.h");
+});
+
+const LED_PIN = 25;
+
+export fn main() callconv(.c) c_int {
+    c.gpio_init(LED_PIN);
+    c.gpio_set_dir(LED_PIN, true);
+
+    while (true) {
+        c.gpio_put(LED_PIN, true);
+        c.busy_wait_us(500_000);
+        c.gpio_put(LED_PIN, false);
+        c.busy_wait_us(500_000);
+    }
+}
+
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+    _ = msg;
+    while (true) {}
+}
 ```
 
-Output will be in `zig-out/bin/`.
+### 5. Build and Upload
+
+```bash
+# Build for RP2040
+zig build -Dchip=rp2040
+
+# Build for RP2350
+zig build -Dchip=rp2350
+
+# Output is in zig-out/bin/
+```
 
 ## API Reference
 
@@ -120,6 +199,7 @@ pub const CpuArch = enum {
 #### `Component`
 ```zig
 pub const Component = enum {
+    // Hardware peripherals
     hardware_gpio,
     hardware_clocks,
     hardware_pll,
@@ -137,8 +217,25 @@ pub const Component = enum {
     hardware_dma,
     hardware_pio,
     hardware_flash,
+
+    // Platform and runtime
     pico_platform,
     pico_runtime,
+    pico_runtime_init,
+    pico_crt0,
+    pico_time,
+    pico_clib_minimal,
+};
+```
+
+#### `Boot2`
+```zig
+pub const Boot2 = enum {
+    boot2_w25q080,      // Default for Pico boards (W25Q16JV flash)
+    boot2_generic_03h,  // Generic 03h read command (slowest, most compatible)
+    boot2_at25sf128a,
+    boot2_is25lp080,
+    boot2_w25x10cl,
 };
 ```
 
@@ -191,6 +288,51 @@ pico_sdk.addComponents(sdk_dep, exe, chip, &.{
 });
 ```
 
+#### `setLinkerScript`
+```zig
+pub fn setLinkerScript(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    chip: Chip,
+    flash_size_bytes: ?usize,
+) void
+```
+Sets the linker script for proper Pico memory layout. This is required for the binary to run on hardware.
+
+The `flash_size_bytes` parameter is optional:
+- `null` uses the default (2MB for RP2040, 4MB for RP2350)
+- Specify a custom size for boards with different flash
+
+**Example:**
+```zig
+// Use default flash size
+pico_sdk.setLinkerScript(sdk_dep, exe, chip, null);
+
+// Specify 16MB flash
+pico_sdk.setLinkerScript(sdk_dep, exe, chip, 16 * 1024 * 1024);
+```
+
+#### `addBoot2`
+```zig
+pub fn addBoot2(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    boot2_variant: Boot2,
+) void
+```
+Adds the boot2 second-stage bootloader for RP2040. **This is required for RP2040 to boot from flash.** RP2350 does not need boot2.
+
+The boot2 variant should match your board's flash chip:
+- `boot2_w25q080` - Default for Pico boards (Winbond W25Q16JV)
+- `boot2_generic_03h` - Most compatible, works with any flash
+
+**Example:**
+```zig
+if (chip == .rp2040) {
+    pico_sdk.addBoot2(sdk_dep, exe, .boot2_w25q080);
+}
+```
+
 #### `addCSourceFiles`
 ```zig
 pub fn addCSourceFiles(
@@ -201,55 +343,10 @@ pub fn addCSourceFiles(
 ```
 Low-level function to add specific SDK source files by path. Prefer `addComponents` for most use cases.
 
-**Example:**
-```zig
-pico_sdk.addCSourceFiles(sdk_dep, exe, &.{
-    "src/rp2_common/hardware_gpio/gpio.c",
-});
-```
+## Complete Example
 
-## Examples
+Here's a complete build.zig with UF2 generation and upload support:
 
-### Zig Blinky
-
-**src/main.zig:**
-```zig
-const c = @cImport({
-    @cInclude("hardware/gpio.h");
-});
-
-const LED_PIN = 25;
-
-fn delay(cycles: u32) void {
-    var i: u32 = 0;
-    while (i < cycles) : (i += 1) {
-        asm volatile ("nop");
-    }
-}
-
-export fn _start() callconv(.c) noreturn {
-    c.gpio_init(LED_PIN);
-    c.gpio_set_dir(LED_PIN, true);
-
-    while (true) {
-        c.gpio_put(LED_PIN, true);
-        delay(1_000_000);
-        c.gpio_put(LED_PIN, false);
-        delay(1_000_000);
-    }
-}
-
-pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    _ = msg;
-    while (true) {}
-}
-```
-
-### C Project with Zig Build
-
-For pure C projects, create your executable without a Zig root source file:
-
-**build.zig:**
 ```zig
 const std = @import("std");
 const pico_sdk = @import("pico_sdk");
@@ -263,101 +360,91 @@ pub fn build(b: *std.Build) void {
 
     const sdk_dep = b.dependency("pico_sdk", .{});
 
-    const exe = b.addExecutable(.{
-        .name = "blinky",
+    // SDK library
+    const sdk_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "pico_sdk_runtime",
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
-            .link_libc = false,
         }),
     });
 
-    pico_sdk.addTo(sdk_dep, exe, chip, board);
-    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+    pico_sdk.addTo(sdk_dep, sdk_lib, chip, board);
+    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, &.{
+        .pico_crt0,
         .pico_platform,
         .pico_runtime,
         .hardware_gpio,
+        .hardware_clocks,
+        .hardware_pll,
+        .hardware_xosc,
+        .hardware_watchdog,
+        .hardware_irq,
+        .hardware_sync,
+        .hardware_timer,
+        .hardware_ticks,
     });
 
-    // Add your C source files
-    exe.addCSourceFiles(.{
-        .files = &.{ "src/main.c", "src/stubs.c" },
-        .flags = &.{
-            "-std=c11",
-            "-ffreestanding",
-            "-D__always_inline=__attribute__((__always_inline__)) inline",
-            "-D__printflike(a,b)=__attribute__((__format__(__printf__,a,b)))",
-            "-Dstatic_assert=_Static_assert",
-        },
+    // Executable
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    mod.stack_protector = false;
+
+    const exe = b.addExecutable(.{
+        .name = "blinky",
+        .root_module = mod,
+    });
+
+    exe.entry = .{ .symbol_name = "_entry_point" };
+    exe.linkLibrary(sdk_lib);
+
+    pico_sdk.addTo(sdk_dep, exe, chip, board);
+    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+        .pico_runtime_init,
+        .pico_clib_minimal,
+    });
+
+    pico_sdk.setLinkerScript(sdk_dep, exe, chip, null);
+
+    if (chip == .rp2040) {
+        pico_sdk.addBoot2(sdk_dep, exe, .boot2_w25q080);
+    }
 
     b.installArtifact(exe);
+
+    // UF2 generation and upload (requires picotool dependency)
+    const picotool_dep = b.dependency("picotool", .{});
+    const picotool_exe = picotool_dep.artifact("picotool");
+
+    // Generate UF2 for drag-and-drop upload
+    const uf2_cmd = b.addRunArtifact(picotool_exe);
+    uf2_cmd.addArgs(&.{ "uf2", "convert", "-t", "elf" });
+    uf2_cmd.addFileArg(exe.getEmittedBin());
+    const uf2_output = uf2_cmd.addOutputFileArg("blinky.uf2");
+    uf2_cmd.step.dependOn(&exe.step);
+
+    const install_uf2 = b.addInstallBinFile(uf2_output, "blinky.uf2");
+    b.getInstallStep().dependOn(&install_uf2.step);
+
+    // Upload step
+    const upload_cmd = b.addRunArtifact(picotool_exe);
+    upload_cmd.addArgs(&.{ "load", "-x", "-t", "elf" });
+    upload_cmd.addFileArg(exe.getEmittedBin());
+    upload_cmd.step.dependOn(&exe.step);
+
+    const upload_step = b.step("upload", "Upload firmware to connected Pico");
+    upload_step.dependOn(&upload_cmd.step);
 }
 ```
 
-**src/main.c:**
-```c
-#include "hardware/gpio.h"
-
-#define LED_PIN 25
-
-static void delay(unsigned int cycles) {
-    for (unsigned int i = 0; i < cycles; i++) {
-        __asm__ volatile("nop");
-    }
-}
-
-void _start(void) {
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, true);
-
-    while (1) {
-        gpio_put(LED_PIN, true);
-        delay(1000000);
-        gpio_put(LED_PIN, false);
-        delay(1000000);
-    }
-}
-```
-
-### C Library Stubs
-
-For freestanding builds, you need to provide stub implementations for C library functions the SDK references. Create `src/stubs.c`:
-
-```c
-#include <stdarg.h>
-
-void _exit(int status) {
-    (void)status;
-    while (1) {}
-}
-
-void __assert_fail(const char *expr, const char *file, int line) {
-    (void)expr; (void)file; (void)line;
-    while (1) {}
-}
-
-int puts(const char *s) {
-    (void)s;
-    return 0;
-}
-
-int vprintf(const char *format, va_list ap) {
-    (void)format; (void)ap;
-    return 0;
-}
-
-void __unhandled_user_irq(void) {
-    while (1) {}
-}
-
-__attribute__((section(".data")))
-void *irq_handler_chain_slots[1] = {0};
-
-__attribute__((section(".data")))
-void *irq_handler_chain_first_slot[1] = {0};
-
-void irq_handler_chain_remove_tail(void) {}
+Then:
+```bash
+zig build                      # Build ELF and UF2
+zig build upload -Dchip=rp2040 # Upload to connected Pico
 ```
 
 ## Build Options
@@ -370,6 +457,9 @@ zig build -Dchip=rp2350 -Dboard=pico2
 
 # Release build
 zig build -Doptimize=ReleaseFast
+
+# Upload to device
+zig build upload -Dchip=rp2040
 ```
 
 ## Supported Boards
@@ -380,33 +470,92 @@ The `board` option accepts any board name from `src/boards/include/boards/`. Com
 - `pico_w` - Raspberry Pi Pico W (RP2040 + WiFi)
 - `pico2` - Raspberry Pi Pico 2 (RP2350)
 
+## Key Concepts
+
+### Component Architecture
+
+The SDK is split into components that can be selectively included:
+
+1. **pico_crt0** - Startup code (vector table, memory init, calls main)
+2. **pico_runtime_init** - Clock and peripheral initialization
+3. **pico_clib_minimal** - Minimal C library stubs for freestanding builds
+4. **pico_platform** - Platform abstraction layer
+5. **pico_runtime** - Runtime support (hardware claim, etc.)
+6. **hardware_*** - Individual hardware peripheral drivers
+
+### Why Two Compile Steps?
+
+The example uses a static library (`sdk_lib`) plus an executable (`exe`):
+
+- `sdk_lib` contains SDK components that are always needed
+- `exe` links `sdk_lib` and adds `pico_runtime_init` and `pico_clib_minimal` directly
+
+The runtime init and clib minimal are added to `exe` directly because they use weak symbols and special linker sections that wouldn't be pulled from a static library.
+
+### Boot2 (RP2040 Only)
+
+RP2040 requires a 256-byte second-stage bootloader (boot2) at the start of flash. This code:
+1. Configures the flash chip for fast XIP (execute-in-place) mode
+2. Jumps to the main application
+
+The Zig build system compiles boot2 from SDK sources, pads it to 252 bytes, calculates a CRC32 checksum, and embeds the 256-byte blob in your binary.
+
+RP2350 has a different boot architecture and doesn't need boot2.
+
 ## Flashing
 
-The build produces a `.bin` file in `zig-out/bin/`. To flash:
+### Using UF2 (Drag and Drop)
 
 1. Hold BOOTSEL button on your Pico
 2. Connect USB while holding BOOTSEL
-3. Copy the `.bin` file to the mounted RPI-RP2 drive
+3. Copy `zig-out/bin/my_app.uf2` to the mounted RPI-RP2 drive
 
-Or use picotool:
+### Using picotool
+
 ```bash
-picotool load zig-out/bin/my_app.bin
-picotool reboot
+# Upload and reboot
+zig build upload -Dchip=rp2040
+
+# Or manually:
+picotool load -x zig-out/bin/my_app
 ```
 
 ## Troubleshooting
 
-### Missing C library headers
-The SDK includes stub headers in `zig/libc_stubs/` for freestanding builds. These are automatically added to the include path by `addTo()`.
+### "Pico second stage bootloader must be 256 bytes"
 
-### Undefined symbols at link time
-You likely need to add more components or provide stub implementations. Common missing symbols:
-- `puts`, `vprintf`, `_exit` - Add to your stubs.c
-- `gpio_*` functions - Add `.hardware_gpio` component
-- `irq_*` functions - Add `.hardware_irq` component
-
-### Wrong target architecture
-Ensure you're using `pico_sdk.getTarget()` to get the correct cross-compilation target:
+You need to add boot2 for RP2040:
 ```zig
-const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, .arm));
+if (chip == .rp2040) {
+    pico_sdk.addBoot2(sdk_dep, exe, .boot2_w25q080);
+}
+```
+
+### Undefined symbol: spin_locks_reset
+
+Add the `hardware_sync` component.
+
+### Undefined symbol: runtime_init
+
+Add the `pico_runtime_init` component directly to your executable (not a static library).
+
+### Binary uploads but doesn't run
+
+1. Ensure you're using `setLinkerScript()` for proper memory layout
+2. Ensure entry point is set: `exe.entry = .{ .symbol_name = "_entry_point" };`
+3. For RP2040, ensure boot2 is added with `addBoot2()`
+
+### Wrong LED pin
+
+LED pin varies by board:
+- Pico (RP2040): GPIO 25
+- Pico W (RP2040): GPIO 0 (directly connected to WiFi chip)
+- Pico 2 (RP2350): GPIO 25
+
+### Build works but device doesn't blink
+
+Check that you're building for the correct chip:
+```bash
+zig build -Dchip=rp2040   # For original Pico
+zig build -Dchip=rp2350   # For Pico 2
 ```
