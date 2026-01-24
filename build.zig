@@ -1056,6 +1056,7 @@ const sdk_c_flags: []const []const u8 = &.{
 
 /// SDK components that can be added to a project
 pub const Component = enum {
+    // Hardware peripherals
     hardware_gpio,
     hardware_clocks,
     hardware_pll,
@@ -1073,12 +1074,29 @@ pub const Component = enum {
     hardware_dma,
     hardware_pio,
     hardware_flash,
+    hardware_divider,
+    hardware_interp,
+    hardware_exception,
+    hardware_resets,
+    hardware_rtc,
+    hardware_vreg,
+    hardware_xip_cache,
+
+    // Platform and runtime
     pico_platform,
     pico_runtime,
     pico_runtime_init,
     pico_crt0,
     pico_time,
     pico_clib_minimal,
+
+    // Standard I/O
+    pico_stdio,
+    pico_stdio_uart,
+    pico_stdio_semihosting,
+
+    // Multicore
+    pico_multicore,
 };
 
 /// Add SDK components to a compile step. This is the recommended way to use the SDK.
@@ -1087,14 +1105,19 @@ pub fn addComponent(
     sdk_dep: *std.Build.Dependency,
     compile: *std.Build.Step.Compile,
     chip: Chip,
+    cpu_arch: CpuArch,
     component: Component,
 ) void {
-    const sources = getComponentSources(chip, component);
+    const sources = getComponentSources(chip, cpu_arch, component);
     for (sources) |src| {
-        compile.addCSourceFile(.{
-            .file = sdk_dep.path(src),
-            .flags = sdk_c_flags,
-        });
+        if (std.mem.endsWith(u8, src, ".S")) {
+            compile.addAssemblyFile(sdk_dep.path(src));
+        } else {
+            compile.addCSourceFile(.{
+                .file = sdk_dep.path(src),
+                .flags = sdk_c_flags,
+            });
+        }
     }
 }
 
@@ -1103,15 +1126,37 @@ pub fn addComponents(
     sdk_dep: *std.Build.Dependency,
     compile: *std.Build.Step.Compile,
     chip: Chip,
+    cpu_arch: CpuArch,
     components: []const Component,
 ) void {
     for (components) |component| {
-        addComponent(sdk_dep, compile, chip, component);
+        addComponent(sdk_dep, compile, chip, cpu_arch, component);
     }
 }
 
-fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
+/// Convenience version of addComponent that defaults to ARM architecture
+pub fn addComponentArm(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    chip: Chip,
+    component: Component,
+) void {
+    addComponent(sdk_dep, compile, chip, .arm, component);
+}
+
+/// Convenience version of addComponents that defaults to ARM architecture
+pub fn addComponentsArm(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    chip: Chip,
+    components: []const Component,
+) void {
+    addComponents(sdk_dep, compile, chip, .arm, components);
+}
+
+fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []const []const u8 {
     return switch (component) {
+        // Hardware peripherals
         .hardware_gpio => switch (chip) {
             .rp2040 => &.{
                 "src/rp2_common/hardware_gpio/gpio.c",
@@ -1133,8 +1178,19 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         .hardware_watchdog => &.{
             "src/rp2_common/hardware_watchdog/watchdog.c",
         },
-        .hardware_irq => &.{
-            "src/rp2_common/hardware_irq/irq.c",
+        .hardware_irq => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/hardware_irq/irq.c",
+            },
+            .rp2350 => switch (cpu_arch) {
+                .arm => &.{
+                    "src/rp2_common/hardware_irq/irq.c",
+                },
+                .riscv => &.{
+                    "src/rp2_common/hardware_irq/irq.c",
+                    "src/rp2_common/hardware_irq/irq_handler_chain_riscv.S",
+                },
+            },
         },
         .hardware_sync => &.{
             "src/rp2_common/hardware_sync/sync.c",
@@ -1168,6 +1224,46 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         .hardware_flash => &.{
             "src/rp2_common/hardware_flash/flash.c",
         },
+        .hardware_divider => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/hardware_divider/divider.S",
+            },
+            .rp2350 => &.{
+                "src/rp2_common/hardware_divider/divider.c",
+            },
+        },
+        .hardware_interp => &.{
+            "src/rp2_common/hardware_interp/interp.c",
+        },
+        .hardware_exception => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/hardware_exception/exception.c",
+            },
+            .rp2350 => switch (cpu_arch) {
+                .arm => &.{
+                    "src/rp2_common/hardware_exception/exception.c",
+                },
+                .riscv => &.{
+                    "src/rp2_common/hardware_exception/exception.c",
+                    "src/rp2_common/hardware_exception/exception_table_riscv.S",
+                },
+            },
+        },
+        .hardware_resets => &.{}, // Header-only component
+        .hardware_rtc => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/hardware_rtc/rtc.c",
+            },
+            .rp2350 => &.{}, // Not available on RP2350
+        },
+        .hardware_vreg => &.{
+            "src/rp2_common/hardware_vreg/vreg.c",
+        },
+        .hardware_xip_cache => &.{
+            "src/rp2_common/hardware_xip_cache/xip_cache.c",
+        },
+
+        // Platform and runtime
         .pico_platform => switch (chip) {
             .rp2040 => &.{
                 "src/rp2040/pico_platform/platform.c",
@@ -1196,8 +1292,13 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
             .rp2040 => &.{
                 "src/rp2_common/pico_crt0/crt0.S",
             },
-            .rp2350 => &.{
-                "src/rp2_common/pico_crt0/crt0.S",
+            .rp2350 => switch (cpu_arch) {
+                .arm => &.{
+                    "src/rp2_common/pico_crt0/crt0.S",
+                },
+                .riscv => &.{
+                    "src/rp2_common/pico_crt0/crt0_riscv.S",
+                },
             },
         },
         .pico_time => &.{
@@ -1206,6 +1307,33 @@ fn getComponentSources(chip: Chip, component: Component) []const []const u8 {
         },
         .pico_clib_minimal => &.{
             "src/rp2_common/pico_clib_interface/minimal_interface.c",
+        },
+
+        // Standard I/O
+        .pico_stdio => &.{
+            "src/rp2_common/pico_stdio/stdio.c",
+        },
+        .pico_stdio_uart => &.{
+            "src/rp2_common/pico_stdio_uart/stdio_uart.c",
+        },
+        .pico_stdio_semihosting => &.{
+            "src/rp2_common/pico_stdio_semihosting/stdio_semihosting.c",
+        },
+
+        // Multicore
+        .pico_multicore => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_multicore/multicore.c",
+            },
+            .rp2350 => switch (cpu_arch) {
+                .arm => &.{
+                    "src/rp2_common/pico_multicore/multicore.c",
+                },
+                .riscv => &.{
+                    "src/rp2_common/pico_multicore/multicore.c",
+                    // RISC-V may need additional files
+                },
+            },
         },
     };
 }

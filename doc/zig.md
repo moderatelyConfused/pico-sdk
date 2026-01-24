@@ -56,12 +56,13 @@ const std = @import("std");
 const pico_sdk = @import("pico_sdk");
 
 pub fn build(b: *std.Build) void {
-    // Target chip and board selection
+    // Target chip, CPU architecture, and board selection
     const chip: pico_sdk.Chip = b.option(pico_sdk.Chip, "chip", "Target chip") orelse .rp2040;
+    const cpu_arch: pico_sdk.CpuArch = b.option(pico_sdk.CpuArch, "cpu_arch", "CPU architecture") orelse .arm;
     const board = b.option([]const u8, "board", "Target board") orelse "pico";
 
     // Get the cross-compilation target for the chip
-    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, .arm));
+    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, cpu_arch));
     const optimize = b.standardOptimizeOption(.{});
 
     // Get the pico-sdk dependency
@@ -81,7 +82,7 @@ pub fn build(b: *std.Build) void {
     pico_sdk.addTo(sdk_dep, sdk_lib, chip, board);
 
     // Add SDK components
-    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, &.{
+    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, cpu_arch, &.{
         .pico_crt0,
         .pico_platform,
         .pico_runtime,
@@ -119,7 +120,7 @@ pub fn build(b: *std.Build) void {
     pico_sdk.addTo(sdk_dep, exe, chip, board);
 
     // Add runtime init and minimal C library (linked directly to exe)
-    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+    pico_sdk.addComponents(sdk_dep, exe, chip, cpu_arch, &.{
         .pico_runtime_init,
         .pico_clib_minimal,
     });
@@ -242,6 +243,13 @@ pub const Component = enum {
     hardware_dma,
     hardware_pio,
     hardware_flash,
+    hardware_divider,
+    hardware_interp,
+    hardware_exception,
+    hardware_resets,
+    hardware_rtc,       // RP2040 only
+    hardware_vreg,
+    hardware_xip_cache,
 
     // Platform and runtime
     pico_platform,
@@ -250,6 +258,14 @@ pub const Component = enum {
     pico_crt0,
     pico_time,
     pico_clib_minimal,
+
+    // Standard I/O
+    pico_stdio,
+    pico_stdio_uart,
+    pico_stdio_semihosting,
+
+    // Multicore
+    pico_multicore,
 };
 ```
 
@@ -299,14 +315,15 @@ pub fn addComponents(
     sdk_dep: *std.Build.Dependency,
     compile: *std.Build.Step.Compile,
     chip: Chip,
+    cpu_arch: CpuArch,
     components: []const Component,
 ) void
 ```
-Adds SDK component source files to a compile step. Use this to include only the SDK functionality you need.
+Adds SDK component source files to a compile step. Use this to include only the SDK functionality you need. The `cpu_arch` parameter is needed to select the correct source files for ARM vs RISC-V builds.
 
 **Example:**
 ```zig
-pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+pico_sdk.addComponents(sdk_dep, exe, chip, cpu_arch, &.{
     .pico_platform,
     .hardware_gpio,
     .hardware_uart,
@@ -378,9 +395,10 @@ const pico_sdk = @import("pico_sdk");
 
 pub fn build(b: *std.Build) void {
     const chip: pico_sdk.Chip = b.option(pico_sdk.Chip, "chip", "Target chip") orelse .rp2040;
+    const cpu_arch: pico_sdk.CpuArch = b.option(pico_sdk.CpuArch, "cpu_arch", "CPU architecture") orelse .arm;
     const board = b.option([]const u8, "board", "Target board") orelse "pico";
 
-    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, .arm));
+    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, cpu_arch));
     const optimize = b.standardOptimizeOption(.{});
 
     const sdk_dep = b.dependency("pico_sdk", .{});
@@ -396,7 +414,7 @@ pub fn build(b: *std.Build) void {
     });
 
     pico_sdk.addTo(sdk_dep, sdk_lib, chip, board);
-    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, &.{
+    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, cpu_arch, &.{
         .pico_crt0,
         .pico_platform,
         .pico_runtime,
@@ -428,7 +446,7 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(sdk_lib);
 
     pico_sdk.addTo(sdk_dep, exe, chip, board);
-    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+    pico_sdk.addComponents(sdk_dep, exe, chip, cpu_arch, &.{
         .pico_runtime_init,
         .pico_clib_minimal,
     });
@@ -482,9 +500,10 @@ const pico_sdk = @import("pico_sdk");
 
 pub fn build(b: *std.Build) void {
     const chip: pico_sdk.Chip = b.option(pico_sdk.Chip, "chip", "Target chip") orelse .rp2040;
+    const cpu_arch: pico_sdk.CpuArch = b.option(pico_sdk.CpuArch, "cpu_arch", "CPU architecture") orelse .arm;
     const board = b.option([]const u8, "board", "Target board") orelse "pico";
 
-    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, .arm));
+    const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, cpu_arch));
     const optimize = b.standardOptimizeOption(.{});
 
     const sdk_dep = b.dependency("pico_sdk", .{});
@@ -500,7 +519,7 @@ pub fn build(b: *std.Build) void {
     });
 
     pico_sdk.addTo(sdk_dep, sdk_lib, chip, board);
-    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, &.{
+    pico_sdk.addComponents(sdk_dep, sdk_lib, chip, cpu_arch, &.{
         .pico_crt0,
         .pico_platform,
         .pico_runtime,
@@ -528,7 +547,7 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(sdk_lib);
 
     pico_sdk.addTo(sdk_dep, exe, chip, board);
-    pico_sdk.addComponents(sdk_dep, exe, chip, &.{
+    pico_sdk.addComponents(sdk_dep, exe, chip, cpu_arch, &.{
         .pico_runtime_init,
         .pico_clib_minimal,
     });
