@@ -1197,6 +1197,15 @@ pub const Component = enum {
     hardware_powman,
     hardware_boot_lock,
     pico_sha256,
+
+    // Phase 5: Async context and additional utilities
+    pico_async_context_base,
+    pico_async_context_poll,
+    pico_async_context_threadsafe_background,
+    pico_flash,
+    pico_i2c_slave,
+    pico_aon_timer,
+    hardware_sync_spin_lock,
 };
 
 /// Add SDK components to a compile step. This is the recommended way to use the SDK.
@@ -1837,6 +1846,29 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
             .rp2350 => &.{
                 "src/rp2_common/pico_sha256/sha256.c",
             },
+        },
+
+        // Phase 5: Async context and additional utilities
+        .pico_async_context_base => &.{
+            "src/rp2_common/pico_async_context/async_context_base.c",
+        },
+        .pico_async_context_poll => &.{
+            "src/rp2_common/pico_async_context/async_context_poll.c",
+        },
+        .pico_async_context_threadsafe_background => &.{
+            "src/rp2_common/pico_async_context/async_context_threadsafe_background.c",
+        },
+        .pico_flash => &.{
+            "src/rp2_common/pico_flash/flash.c",
+        },
+        .pico_i2c_slave => &.{
+            "src/rp2_common/pico_i2c_slave/i2c_slave.c",
+        },
+        .pico_aon_timer => &.{
+            "src/rp2_common/pico_aon_timer/aon_timer.c",
+        },
+        .hardware_sync_spin_lock => &.{
+            "src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
         },
     };
 }

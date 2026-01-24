@@ -288,6 +288,15 @@ pub const Component = enum {
     hardware_powman,        // RP2350 only
     hardware_boot_lock,     // RP2350 only
     pico_sha256,            // RP2350 only
+
+    // Async context and utilities
+    pico_async_context_base,
+    pico_async_context_poll,
+    pico_async_context_threadsafe_background,
+    pico_flash,
+    pico_i2c_slave,
+    pico_aon_timer,
+    hardware_sync_spin_lock,
 };
 ```
 
