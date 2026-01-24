@@ -1294,6 +1294,123 @@ pub fn componentRequiresWrapping(component: Component) bool {
     };
 }
 
+/// TinyUSB configuration for USB support
+pub const TinyUSBMode = enum {
+    device,
+    host,
+    dual,
+};
+
+/// Add TinyUSB library for USB support.
+/// Returns a static library that should be linked to your executable.
+/// The library is built with pico-sdk headers and OSAL support.
+///
+/// Example usage:
+/// ```zig
+/// const tinyusb_lib = pico_sdk.addTinyUSB(sdk_dep, .{
+///     .target = target,
+///     .optimize = optimize,
+///     .chip = chip,
+///     .mode = .device,
+/// });
+/// // Add tusb_config.h include path to TinyUSB
+/// tinyusb_lib.addIncludePath(b.path("src"));
+/// exe.linkLibrary(tinyusb_lib);
+/// ```
+pub fn addTinyUSB(
+    sdk_dep: *std.Build.Dependency,
+    options: struct {
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+        chip: Chip,
+        board: []const u8 = "pico",
+        mode: TinyUSBMode = .device,
+        cdc: bool = true,
+        hid: bool = false,
+        msc: bool = false,
+        midi: bool = false,
+        vendor: bool = true, // Needed for reset interface
+    },
+) *std.Build.Step.Compile {
+    const b = sdk_dep.builder;
+
+    const mod = b.createModule(.{
+        .target = options.target,
+        .optimize = options.optimize,
+        .link_libc = false,
+    });
+
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "tinyusb",
+        .root_module = mod,
+    });
+
+    // TinyUSB source path within pico-sdk
+    const tinyusb_src = sdk_dep.path("lib/tinyusb/src");
+
+    // Define the MCU - both RP2040 and RP2350 use the same USB controller
+    lib.root_module.addCMacro("CFG_TUSB_MCU", "OPT_MCU_RP2040");
+    lib.root_module.addCMacro("CFG_TUSB_OS", "OPT_OS_PICO");
+
+    const c_flags: []const []const u8 = &.{
+        "-Wno-unused-parameter",
+        "-Wno-cast-function-type",
+        "-Wno-sign-compare",
+        "-fno-sanitize=undefined",
+    };
+
+    // Common sources (always needed)
+    lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "tusb.c"), .flags = c_flags });
+    lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "common/tusb_fifo.c"), .flags = c_flags });
+
+    // Device mode sources
+    if (options.mode == .device or options.mode == .dual) {
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "device/usbd.c"), .flags = c_flags });
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "device/usbd_control.c"), .flags = c_flags });
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "portable/raspberrypi/rp2040/dcd_rp2040.c"), .flags = c_flags });
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "portable/raspberrypi/rp2040/rp2040_usb.c"), .flags = c_flags });
+
+        // Device class drivers
+        if (options.cdc) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/cdc/cdc_device.c"), .flags = c_flags });
+        if (options.hid) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/hid/hid_device.c"), .flags = c_flags });
+        if (options.msc) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/msc/msc_device.c"), .flags = c_flags });
+        if (options.midi) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/midi/midi_device.c"), .flags = c_flags });
+        if (options.vendor) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/vendor/vendor_device.c"), .flags = c_flags });
+    }
+
+    // Host mode sources
+    if (options.mode == .host or options.mode == .dual) {
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "host/usbh.c"), .flags = c_flags });
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "host/hub.c"), .flags = c_flags });
+        lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "portable/raspberrypi/rp2040/hcd_rp2040.c"), .flags = c_flags });
+        if (options.mode == .host) {
+            lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "portable/raspberrypi/rp2040/rp2040_usb.c"), .flags = c_flags });
+        }
+
+        // Host class drivers
+        if (options.cdc) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/cdc/cdc_host.c"), .flags = c_flags });
+        if (options.hid) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/hid/hid_host.c"), .flags = c_flags });
+        if (options.msc) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/msc/msc_host.c"), .flags = c_flags });
+        if (options.vendor) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/vendor/vendor_host.c"), .flags = c_flags });
+    }
+
+    // Add libc stubs first (for freestanding builds)
+    lib.addSystemIncludePath(sdk_dep.path("zig/libc_stubs"));
+
+    // Add pico-sdk include paths (includes TinyUSB path)
+    addSdkIncludePaths(sdk_dep, lib, options.chip);
+
+    // Add generated config headers
+    const generated = generateConfigHeadersForDep(b, options.chip, options.board);
+    lib.addIncludePath(generated);
+
+    // Add SDK compile definitions
+    addSdkCompileDefinitions(lib, options.chip, options.board);
+
+    return lib;
+}
+
 /// Add compile definitions required for wrapped components to work correctly.
 /// Call this on your compile step when using setLinkerScriptWithWrapping.
 ///
@@ -1586,10 +1703,12 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
         .hardware_irq => switch (chip) {
             .rp2040 => &.{
                 "src/rp2_common/hardware_irq/irq.c",
+                "src/rp2_common/hardware_irq/irq_handler_chain.S",
             },
             .rp2350 => switch (cpu_arch) {
                 .arm => &.{
                     "src/rp2_common/hardware_irq/irq.c",
+                    "src/rp2_common/hardware_irq/irq_handler_chain.S",
                 },
                 .riscv => &.{
                     "src/rp2_common/hardware_irq/irq.c",
