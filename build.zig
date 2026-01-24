@@ -1080,6 +1080,11 @@ fn addSdkIncludePaths(sdk_dep: *std.Build.Dependency, compile: *std.Build.Step.C
     for (rp2_common_dirs) |dir| {
         compile.addSystemIncludePath(sdk_dep.path(dir));
     }
+
+    // TinyUSB includes (for USB support)
+    compile.addSystemIncludePath(sdk_dep.path("lib/tinyusb/src"));
+    compile.addSystemIncludePath(sdk_dep.path("src/rp2_common/tinyusb/include"));
+    compile.addSystemIncludePath(sdk_dep.path("src/rp2_common/pico_fix/rp2040_usb_device_enumeration/include"));
 }
 
 fn addSdkCompileDefinitions(compile: *std.Build.Step.Compile, chip: Chip, board: []const u8) void {
@@ -1206,6 +1211,10 @@ pub const Component = enum {
     pico_i2c_slave,
     pico_aon_timer,
     hardware_sync_spin_lock,
+
+    // Phase 4: USB support
+    pico_stdio_usb,
+    pico_fix_rp2040_usb_device_enumeration,
 };
 
 /// Add SDK components to a compile step. This is the recommended way to use the SDK.
@@ -1869,6 +1878,19 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
         },
         .hardware_sync_spin_lock => &.{
             "src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
+        },
+
+        // Phase 4: USB support
+        .pico_stdio_usb => &.{
+            "src/rp2_common/pico_stdio_usb/stdio_usb.c",
+            "src/rp2_common/pico_stdio_usb/reset_interface.c",
+            "src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c",
+        },
+        .pico_fix_rp2040_usb_device_enumeration => switch (chip) {
+            .rp2040 => &.{
+                "src/rp2_common/pico_fix/rp2040_usb_device_enumeration/rp2040_usb_device_enumeration.c",
+            },
+            .rp2350 => &.{}, // Not needed on RP2350
         },
     };
 }
