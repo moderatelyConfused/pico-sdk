@@ -1231,9 +1231,18 @@ pub fn addComponent(
         if (std.mem.endsWith(u8, src, ".S")) {
             compile.addAssemblyFile(sdk_dep.path(src));
         } else {
+            // pico_clib_interface needs TLS setup disabled since picolibc is built
+            // without TLS to avoid GOT section issues with UF2 generation
+            const flags = if (component == .pico_clib_interface)
+                sdk_c_flags ++ &[_][]const u8{
+                    "-DPICO_RUNTIME_NO_INIT_PER_CORE_TLS_SETUP=1",
+                    "-DPICO_RUNTIME_SKIP_INIT_PER_CORE_TLS_SETUP=1",
+                }
+            else
+                sdk_c_flags;
             compile.addCSourceFile(.{
                 .file = sdk_dep.path(src),
-                .flags = sdk_c_flags,
+                .flags = flags,
             });
         }
     }
