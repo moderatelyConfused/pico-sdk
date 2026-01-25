@@ -1231,8 +1231,13 @@ pub fn addComponent(
         if (std.mem.endsWith(u8, src, ".S")) {
             compile.addAssemblyFile(sdk_dep.path(src));
         } else {
-            // pico_clib_interface needs TLS setup disabled since picolibc is built
-            // without TLS to avoid GOT section issues with UF2 generation
+            // Skip TLS setup for pico_clib_interface. The pico-sdk doesn't have functional
+            // TLS support yet (see https://github.com/raspberrypi/pico-sdk/issues/291).
+            // Both GCC's emutls and picolibc's native TLS result in all cores sharing
+            // the same TLS storage, so _Thread_local variables are effectively globals.
+            // picolibc's TLS setup code references __arm32_tls_tcb_offset which creates
+            // a GOT section that the SDK's linker scripts don't handle, breaking UF2
+            // generation. Since TLS setup is a no-op anyway, we can safely skip it.
             const flags = if (component == .pico_clib_interface)
                 sdk_c_flags ++ &[_][]const u8{
                     "-DPICO_RUNTIME_NO_INIT_PER_CORE_TLS_SETUP=1",
