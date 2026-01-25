@@ -890,9 +890,6 @@ pub fn addTo(sdk_dep: *std.Build.Dependency, compile: *std.Build.Step.Compile, c
     const generated = generateConfigHeadersForDep(b, chip, board);
     compile.addIncludePath(generated);
 
-    // Add libc stubs for freestanding builds (must come before SDK includes)
-    compile.addSystemIncludePath(sdk_dep.path("zig/libc_stubs"));
-
     // Add all SDK include paths
     addSdkIncludePaths(sdk_dep, compile, chip);
 
@@ -1136,7 +1133,7 @@ const sdk_c_flags: []const []const u8 = &.{
     "-fno-strict-aliasing",
     "-ffreestanding",
     "-D__always_inline=__attribute__((__always_inline__)) inline",
-    "-D__printflike(a,b)=__attribute__((__format__(__printf__,a,b)))",
+    // Note: __printflike is defined by picolibc's sys/cdefs.h
     "-Dstatic_assert=_Static_assert",
 };
 
@@ -1174,7 +1171,7 @@ pub const Component = enum {
     pico_runtime_init,
     pico_crt0,
     pico_time,
-    pico_clib_minimal,
+    pico_clib_interface,
 
     // Standard I/O
     pico_stdio,
@@ -1400,8 +1397,12 @@ pub fn addTinyUSB(
         if (options.vendor) lib.addCSourceFile(.{ .file = tinyusb_src.path(b, "class/vendor/vendor_host.c"), .flags = c_flags });
     }
 
-    // Add libc stubs first (for freestanding builds)
-    lib.addSystemIncludePath(sdk_dep.path("zig/libc_stubs"));
+    // Add picolibc headers for C library types
+    const picolibc_dep = b.lazyDependency("picolibc", .{
+        .target = options.target,
+        .optimize = options.optimize,
+    }) orelse @panic("picolibc dependency not available");
+    lib.linkLibrary(picolibc_dep.artifact("c"));
 
     // Add pico-sdk include paths (includes TinyUSB path)
     addSdkIncludePaths(sdk_dep, lib, options.chip);
@@ -1414,6 +1415,35 @@ pub fn addTinyUSB(
     addSdkCompileDefinitions(lib, options.chip, options.board);
 
     return lib;
+}
+
+/// Get the picolibc library for linking.
+/// This provides a full C library implementation (malloc, printf internals, etc.)
+/// that integrates with the pico-sdk runtime.
+///
+/// Usage:
+/// ```zig
+/// const picolibc = pico_sdk.getPicolibc(sdk_dep, .{
+///     .target = target,
+///     .optimize = optimize,
+/// });
+/// exe.linkLibrary(picolibc);
+/// ```
+pub fn getPicolibc(
+    sdk_dep: *std.Build.Dependency,
+    options: struct {
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+    },
+) *std.Build.Step.Compile {
+    const b = sdk_dep.builder;
+
+    const picolibc_dep = b.lazyDependency("picolibc", .{
+        .target = options.target,
+        .optimize = options.optimize,
+    }) orelse @panic("picolibc dependency not available - ensure pico-sdk was fetched correctly");
+
+    return picolibc_dep.artifact("c");
 }
 
 /// Add compile definitions required for wrapped components to work correctly.
@@ -1834,8 +1864,9 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
             "src/common/pico_time/time.c",
             "src/common/pico_time/timeout_helper.c",
         },
-        .pico_clib_minimal => &.{
-            "src/rp2_common/pico_clib_interface/minimal_interface.c",
+        .pico_clib_interface => &.{
+            // Use picolibc_interface for tinystdio (FDEV_SETUP_STREAM based I/O)
+            "src/rp2_common/pico_clib_interface/picolibc_interface.c",
         },
 
         // Standard I/O

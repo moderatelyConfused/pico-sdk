@@ -8,6 +8,11 @@
             .url = "git+https://github.com/hathach/tinyusb#86ad6e56c1700e85f1c5678607a762cfe3aa2f47",
             .hash = "N-V-__8AAGUZ_gDYqxEdexw7Rfp9YENlWbwlDPQu0bCfKxws",
         },
+        .picolibc = .{
+            .path = "../picolibc-zig",
+            // .url = "git+https://github.com/moderatelyConfused/picolibc-zig#d1ba636eaa2e888ac3f4e5176d647885da04d38d",
+            // .hash = "N-V-__8AAEbJAAJS6Jxa5kmmOeltbg1XwOrCK0vwXmFpb0Ci",
+        },
     },
     .paths = .{
         "build.zig",
