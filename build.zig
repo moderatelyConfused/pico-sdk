@@ -10,6 +10,36 @@ pub const CpuArch = enum {
     riscv,
 };
 
+/// Add compile definitions required for the specified binary type.
+/// Call this on any compile step that includes pico_crt0 when using non-default binary types.
+pub fn addBinaryTypeDefinitions(compile: *std.Build.Step.Compile, binary_type: BinaryType) void {
+    switch (binary_type) {
+        .no_flash => compile.root_module.addCMacro("PICO_NO_FLASH", "1"),
+        .copy_to_ram => compile.root_module.addCMacro("PICO_COPY_TO_RAM", "1"),
+        .default, .blocked_ram => {},
+    }
+}
+
+/// Binary type determines how the program is loaded and executed.
+pub const BinaryType = enum {
+    /// Default: Code runs from flash (XIP), data copied to RAM at startup.
+    /// Most common configuration for flash-based applications.
+    default,
+
+    /// No flash: Entire program runs from RAM. Used for RAM-only execution
+    /// (e.g., loaded via debugger or bootloader). No flash access at runtime.
+    no_flash,
+
+    /// Copy to RAM: Code is copied from flash to RAM at startup, then executes
+    /// from RAM. Faster execution but uses more RAM. Flash still used for storage.
+    copy_to_ram,
+
+    /// Blocked RAM: Code runs from flash, but certain RAM regions are reserved/blocked.
+    /// Used for special memory layouts or when sharing RAM with other cores.
+    /// Note: Only available on RP2040.
+    blocked_ram,
+};
+
 pub fn build(b: *std.Build) void {
     const chip = b.option(Chip, "chip", "Target chip (rp2040 or rp2350)") orelse .rp2040;
     const cpu_arch = b.option(CpuArch, "cpu_arch", "CPU architecture (arm or riscv, rp2350 only)") orelse .arm;
@@ -361,11 +391,13 @@ pub fn getTarget(chip: Chip, cpu_arch: CpuArch) std.Target.Query {
 /// Sets the linker script for proper Pico memory layout.
 /// This is required for the binary to run on actual hardware.
 /// flash_size_bytes: Optional flash size in bytes. Defaults to 2MB for RP2040, 4MB for RP2350.
+/// binary_type: Controls how the binary is loaded and executed. Defaults to .default (XIP from flash).
 pub fn setLinkerScript(
     sdk_dep: *std.Build.Dependency,
     compile: *std.Build.Step.Compile,
     chip: Chip,
     flash_size_bytes: ?usize,
+    binary_type: BinaryType,
 ) void {
     const b = compile.step.owner;
 
@@ -376,11 +408,28 @@ pub fn setLinkerScript(
     };
     const flash_size = flash_size_bytes orelse default_flash_size;
 
-    // SDK's linker script path
-    const sdk_linker_script = switch (chip) {
-        .rp2040 => sdk_dep.path("src/rp2_common/pico_crt0/rp2040/memmap_default.ld"),
-        .rp2350 => sdk_dep.path("src/rp2_common/pico_crt0/rp2350/memmap_default.ld"),
+    // SDK's linker script path based on binary type
+    // blocked_ram is only available on RP2040
+    if (binary_type == .blocked_ram and chip == .rp2350) {
+        @panic("blocked_ram binary type is only available on RP2040");
+    }
+    const linker_script_name: []const u8 = switch (binary_type) {
+        .default => "memmap_default.ld",
+        .no_flash => "memmap_no_flash.ld",
+        .copy_to_ram => "memmap_copy_to_ram.ld",
+        .blocked_ram => "memmap_blocked_ram.ld",
     };
+    const sdk_linker_script = switch (chip) {
+        .rp2040 => sdk_dep.path(b.fmt("src/rp2_common/pico_crt0/rp2040/{s}", .{linker_script_name})),
+        .rp2350 => sdk_dep.path(b.fmt("src/rp2_common/pico_crt0/rp2350/{s}", .{linker_script_name})),
+    };
+
+    // Add compile definitions for binary type
+    switch (binary_type) {
+        .no_flash => compile.root_module.addCMacro("PICO_NO_FLASH", "1"),
+        .copy_to_ram => compile.root_module.addCMacro("PICO_COPY_TO_RAM", "1"),
+        else => {},
+    }
 
     // Use custom step to replace INCLUDE directive with actual flash region
     // Pass empty symbol_aliases for basic linker script without wrapping
@@ -394,6 +443,7 @@ pub fn setLinkerScript(
 /// Use this instead of setLinkerScript when you need wrapping functionality.
 ///
 /// wrapped_components: Components that need their symbols wrapped (e.g., .pico_stdio, .pico_printf)
+/// binary_type: Controls how the binary is loaded and executed. Defaults to .default (XIP from flash).
 ///
 /// Note: pico_malloc wrapping is not supported as it requires an actual malloc implementation.
 /// For malloc, either use Zig's allocator or link against a libc that provides malloc.
@@ -403,6 +453,7 @@ pub fn setLinkerScriptWithWrapping(
     chip: Chip,
     flash_size_bytes: ?usize,
     wrapped_components: []const Component,
+    binary_type: BinaryType,
 ) void {
     const b = compile.step.owner;
 
@@ -412,10 +463,27 @@ pub fn setLinkerScriptWithWrapping(
     };
     const flash_size = flash_size_bytes orelse default_flash_size;
 
-    const sdk_linker_script = switch (chip) {
-        .rp2040 => sdk_dep.path("src/rp2_common/pico_crt0/rp2040/memmap_default.ld"),
-        .rp2350 => sdk_dep.path("src/rp2_common/pico_crt0/rp2350/memmap_default.ld"),
+    // blocked_ram is only available on RP2040
+    if (binary_type == .blocked_ram and chip == .rp2350) {
+        @panic("blocked_ram binary type is only available on RP2040");
+    }
+    const linker_script_name: []const u8 = switch (binary_type) {
+        .default => "memmap_default.ld",
+        .no_flash => "memmap_no_flash.ld",
+        .copy_to_ram => "memmap_copy_to_ram.ld",
+        .blocked_ram => "memmap_blocked_ram.ld",
     };
+    const sdk_linker_script = switch (chip) {
+        .rp2040 => sdk_dep.path(b.fmt("src/rp2_common/pico_crt0/rp2040/{s}", .{linker_script_name})),
+        .rp2350 => sdk_dep.path(b.fmt("src/rp2_common/pico_crt0/rp2350/{s}", .{linker_script_name})),
+    };
+
+    // Add compile definitions for binary type
+    switch (binary_type) {
+        .no_flash => compile.root_module.addCMacro("PICO_NO_FLASH", "1"),
+        .copy_to_ram => compile.root_module.addCMacro("PICO_COPY_TO_RAM", "1"),
+        else => {},
+    }
 
     // Collect all symbol aliases
     var symbol_aliases = std.ArrayList(SymbolAlias).initCapacity(b.allocator, 64) catch @panic("OOM");
@@ -1460,6 +1528,119 @@ pub fn getPicolibc(
     return picolibc_dep.artifact("c");
 }
 
+/// Build pioasm, the PIO assembler tool.
+/// This builds pioasm from the SDK sources as a native executable.
+/// The returned artifact can be used with addPioHeader to generate headers from .pio files.
+///
+/// Usage:
+/// ```zig
+/// const pioasm = pico_sdk.buildPioasm(sdk_dep);
+/// const pio_header = pico_sdk.addPioHeader(sdk_dep, pioasm, b.path("src/my_program.pio"));
+/// exe.addIncludePath(pio_header.dirname());
+/// ```
+pub fn buildPioasm(sdk_dep: *std.Build.Dependency) *std.Build.Step.Compile {
+    const b = sdk_dep.builder;
+
+    const pioasm = b.addExecutable(.{
+        .name = "pioasm",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }),
+    });
+
+    const cpp_flags: []const []const u8 = &.{
+        "-std=c++17",
+    };
+
+    // Generate version.h
+    const version_h = b.addWriteFiles();
+    _ = version_h.add("version.h",
+        \\#ifndef _PIOASM_VERSION_H
+        \\#define _PIOASM_VERSION_H
+        \\#define PIOASM_VERSION_STRING "pioasm 2.2.0"
+        \\#endif
+    );
+    pioasm.addIncludePath(version_h.getDirectory());
+
+    // Add include path for generated parser headers and pioasm source
+    pioasm.addIncludePath(sdk_dep.path("tools/pioasm/gen"));
+    pioasm.addIncludePath(sdk_dep.path("tools/pioasm"));
+
+    // Add source files
+    const pioasm_sources: []const []const u8 = &.{
+        "tools/pioasm/main.cpp",
+        "tools/pioasm/pio_assembler.cpp",
+        "tools/pioasm/pio_disassembler.cpp",
+        "tools/pioasm/c_sdk_output.cpp",
+        "tools/pioasm/hex_output.cpp",
+        "tools/pioasm/json_output.cpp",
+        "tools/pioasm/python_output.cpp",
+        "tools/pioasm/ada_output.cpp",
+        "tools/pioasm/go_output.cpp",
+        "tools/pioasm/gen/lexer.cpp",
+        "tools/pioasm/gen/parser.cpp",
+    };
+
+    for (pioasm_sources) |src| {
+        pioasm.addCSourceFile(.{
+            .file = sdk_dep.path(src),
+            .flags = cpp_flags,
+        });
+    }
+
+    pioasm.linkLibCpp();
+
+    return pioasm;
+}
+
+/// Generate a C header from a PIO assembly file.
+/// Returns a LazyPath to the generated header file.
+///
+/// Usage:
+/// ```zig
+/// const pioasm = pico_sdk.buildPioasm(sdk_dep);
+/// const pio_header = pico_sdk.addPioHeader(sdk_dep, pioasm, b.path("src/ws2812.pio"));
+/// exe.step.dependOn(&pio_header.step);
+/// exe.addIncludePath(pio_header.dirname());
+/// ```
+pub fn addPioHeader(
+    sdk_dep: *std.Build.Dependency,
+    pioasm: *std.Build.Step.Compile,
+    pio_file: std.Build.LazyPath,
+) std.Build.LazyPath {
+    _ = sdk_dep;
+    const b = pioasm.step.owner;
+
+    const run = b.addRunArtifact(pioasm);
+    run.addArg("-o");
+    run.addArg("c-sdk");
+    run.addFileArg(pio_file);
+    const output = run.addOutputFileArg("pio_program.h");
+
+    return output;
+}
+
+/// Generate a C header from a PIO assembly file with a custom output name.
+/// Returns a LazyPath to the generated header file.
+pub fn addPioHeaderNamed(
+    sdk_dep: *std.Build.Dependency,
+    pioasm: *std.Build.Step.Compile,
+    pio_file: std.Build.LazyPath,
+    output_name: []const u8,
+) std.Build.LazyPath {
+    _ = sdk_dep;
+    const b = pioasm.step.owner;
+
+    const run = b.addRunArtifact(pioasm);
+    run.addArg("-o");
+    run.addArg("c-sdk");
+    run.addFileArg(pio_file);
+    const output = run.addOutputFileArg(output_name);
+
+    return output;
+}
+
 /// Add compile definitions required for wrapped components to work correctly.
 /// Call this on your compile step when using setLinkerScriptWithWrapping.
 ///
@@ -2025,7 +2206,6 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
                 "src/rp2_common/pico_sha256/sha256.c",
             },
         },
-
         // Phase 5: Async context and additional utilities
         .pico_async_context_base => &.{
             "src/rp2_common/pico_async_context/async_context_base.c",
