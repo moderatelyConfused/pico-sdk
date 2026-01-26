@@ -724,19 +724,22 @@ static int _vsnprintf(out_fct_type out, char *buffer, const size_t maxlen, const
                     if (flags & FLAGS_LONG_LONG) {
 #if PICO_PRINTF_SUPPORT_LONG_LONG
                         const long long value = va_arg(va, long long);
+                        // Cast to unsigned before negating to avoid undefined behavior with LLONG_MIN
                         idx = _ntoa_long_long(out, buffer, idx, maxlen,
-                                              (unsigned long long) (value > 0 ? value : 0 - value), value < 0, base,
+                                              (value < 0) ? (0ULL - (unsigned long long)value) : (unsigned long long)value, value < 0, base,
                                               precision, width, flags);
 #endif
                     } else if (flags & FLAGS_LONG) {
                         const long value = va_arg(va, long);
-                        idx = _ntoa_long(out, buffer, idx, maxlen, (unsigned long) (value > 0 ? value : 0 - value),
+                        // Cast to unsigned before negating to avoid undefined behavior with LONG_MIN
+                        idx = _ntoa_long(out, buffer, idx, maxlen, (value < 0) ? (0UL - (unsigned long)value) : (unsigned long)value,
                                          value < 0, base, precision, width, flags);
                     } else {
                         const int value = (flags & FLAGS_CHAR) ? (char) va_arg(va, int) : (flags & FLAGS_SHORT)
                                                                                           ? (short int) va_arg(va, int)
                                                                                           : va_arg(va, int);
-                        idx = _ntoa_long(out, buffer, idx, maxlen, (unsigned int) (value > 0 ? value : 0 - value),
+                        // Cast to unsigned before negating to avoid undefined behavior with INT_MIN
+                        idx = _ntoa_long(out, buffer, idx, maxlen, (value < 0) ? (0U - (unsigned int)value) : (unsigned int)value,
                                          value < 0, base, precision, width, flags);
                     }
                 } else {

@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
         .hardware_uart,
         .hardware_resets,
         .pico_float, // test-specific
+        .pico_double, // needed for printf %g double arithmetic
         .pico_stdlib,
         .pico_stdio,
         .pico_stdio_uart,
@@ -67,6 +68,8 @@ pub fn build(b: *std.Build) void {
     pico_sdk.setLinkerScriptWithWrapping(sdk_dep, exe, chip, null, &.{
         .pico_stdio,
         .pico_printf,
+        .pico_float,
+        .pico_double,
     }, .default);
 
     if (chip == .rp2040) {
@@ -78,11 +81,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }));
 
+    // Disable UBSAN for this test - it intentionally tests edge cases like
+    // negative float to unsigned int conversion which is undefined behavior
     exe.addCSourceFile(.{
         .file = b.path("pico_float_test.c"),
-        .flags = &.{},
+        .flags = &.{"-fno-sanitize=undefined"},
     });
     exe.addAssemblyFile(sdk_dep.path("test/pico_float_test/llvm/call_apsr.S"));
+
+    // Add VFP-based __aeabi_cfcmple/cfcmpeq/cfrcmple implementations for RP2350
+    // These are only needed by this test which explicitly calls them - normal code
+    // uses VFP instructions directly (compiler emits vcmp.f32 + vmrs)
+    if (chip == .rp2350) {
+        exe.addAssemblyFile(b.path("float_cmp_vfp.S"));
+    }
 
     b.installArtifact(exe);
 }

@@ -102,44 +102,6 @@ int64_t __aeabi_ldiv0(int64_t r) {
 }
 
 // ============================================================================
-// AEABI float comparison helpers (ARM only)
-// These are called by pico_float's AEABI wrappers
-// They set APSR flags for conditional instructions
-// ============================================================================
-
-// Compare two floats for equality, set Z flag if equal
-void __aeabi_cfcmpeq(float a, float b) {
-    // Note: This uses a simplified comparison that may not handle NaN correctly
-    // A proper implementation would need to handle IEEE 754 special cases
-    if (a == b) {
-        // Set Z flag (equal)
-        pico_default_asm_volatile("cmp r0, r0" : : : "cc");
-    } else {
-        // Clear Z flag (not equal) - compare different values
-        pico_default_asm_volatile("movs r0, #0\nmovs r1, #1\ncmp r0, r1" : : : "r0", "r1", "cc");
-    }
-}
-
-// Compare two floats, set flags for a <= b
-void __aeabi_cfcmple(float a, float b) {
-    if (a < b) {
-        // Set N flag (less than)
-        pico_default_asm_volatile("movs r0, #1\nmovs r1, #0\ncmp r0, r1" : : : "r0", "r1", "cc");
-    } else if (a == b) {
-        // Set Z flag (equal)
-        pico_default_asm_volatile("cmp r0, r0" : : : "cc");
-    } else {
-        // Clear N, Z flags (greater than)
-        pico_default_asm_volatile("movs r0, #0\nmovs r1, #1\ncmp r0, r1" : : : "r0", "r1", "cc");
-    }
-}
-
-// Reverse compare: set flags for b <= a (equivalent to a >= b)
-void __aeabi_cfrcmple(float a, float b) {
-    __aeabi_cfcmple(b, a);
-}
-
-// ============================================================================
 // Sync functions (ARM implementations)
 // ============================================================================
 

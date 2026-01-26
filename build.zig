@@ -123,7 +123,7 @@ fn buildTestSubprojects(
         if (!test_proj.cpu_arch_filter.matches(cpu_arch)) continue;
 
         // Build args for zig build
-        const run_build = b.addSystemCommand(&.{"zig", "build"});
+        const run_build = b.addSystemCommand(&.{ "zig", "build" });
         run_build.addArgs(&.{
             b.fmt("-Dchip={s}", .{@tagName(chip)}),
             b.fmt("-Dcpu_arch={s}", .{@tagName(cpu_arch)}),
@@ -172,7 +172,7 @@ fn buildAndRunTestsOnDevice(
         }
 
         // Build the test with PICO_ENTER_USB_BOOT_ON_EXIT so it reboots to BOOTSEL when done
-        const run_build = b.addSystemCommand(&.{"zig", "build"});
+        const run_build = b.addSystemCommand(&.{ "zig", "build" });
         run_build.addArgs(&.{
             b.fmt("-Dchip={s}", .{@tagName(chip)}),
             b.fmt("-Dcpu_arch={s}", .{@tagName(cpu_arch)}),
@@ -202,7 +202,7 @@ fn buildAndRunTestsOnDevice(
         // Wait for the test to complete and device to reboot to BOOTSEL
         // pico_stdlib_test takes ~10 seconds for its timing loops
         // Allow 45 seconds for test execution and reboot
-        const wait_cmd = b.addSystemCommand(&.{ "sleep", "45" });
+        const wait_cmd = b.addSystemCommand(&.{ "sleep", "15" });
         wait_cmd.step.dependOn(&load_cmd.step);
 
         prev_step = &wait_cmd.step;
@@ -687,7 +687,11 @@ pub fn getTarget(chip: Chip, cpu_arch: CpuArch) std.Target.Query {
                 .cpu_arch = .thumb,
                 .cpu_model = .{ .explicit = &std.Target.arm.cpu.cortex_m33 },
                 .os_tag = .freestanding,
-                .abi = .eabi,
+                .abi = .eabihf, // Hard-float ABI: floats passed in VFP registers
+                // Enable FPv5-SP-D16 (single-precision FPU with 16 d-registers)
+                // This matches CMake's -mfpu=fpv5-sp-d16 and allows the compiler
+                // to emit VFP instructions directly for float operations
+                .cpu_features_add = std.Target.arm.featureSet(&.{.fp_armv8d16sp}),
             },
             .riscv => .{
                 .cpu_arch = .riscv32,
@@ -802,6 +806,14 @@ pub fn setLinkerScriptWithWrapping(
         const aliases = getComponentSymbolAliases(component);
         for (aliases) |alias| {
             symbol_aliases.append(b.allocator, alias) catch @panic("OOM");
+        }
+        // For components that use __wrap_* pattern, generate aliases from wrapping symbols
+        const wrap_symbols = getComponentWrapFlags(chip, component);
+        for (wrap_symbols) |sym| {
+            symbol_aliases.append(b.allocator, .{
+                .name = sym,
+                .target = b.fmt("__wrap_{s}", .{sym}),
+            }) catch @panic("OOM");
         }
     }
 
@@ -2165,72 +2177,125 @@ fn getComponentWrapFlags(chip: Chip, component: Component) []const []const u8 {
             },
             .rp2350 => &.{},
         },
-        .pico_float => &.{
-            // AEABI arithmetic
-            "__aeabi_fadd",
-            "__aeabi_fdiv",
-            "__aeabi_fmul",
-            "__aeabi_frsub",
-            "__aeabi_fsub",
-            // AEABI compare
-            "__aeabi_cfcmpeq",
-            "__aeabi_cfrcmple",
-            "__aeabi_cfcmple",
-            "__aeabi_fcmpeq",
-            "__aeabi_fcmplt",
-            "__aeabi_fcmple",
-            "__aeabi_fcmpge",
-            "__aeabi_fcmpgt",
-            "__aeabi_fcmpun",
-            // AEABI conversions
-            "__aeabi_i2f",
-            "__aeabi_ui2f",
-            "__aeabi_f2iz",
-            "__aeabi_f2uiz",
-            "__aeabi_l2f",
-            "__aeabi_ul2f",
-            "__aeabi_f2lz",
-            "__aeabi_f2ulz",
-            "__aeabi_f2d",
-            // Math functions
-            "sqrtf",
-            "cosf",
-            "sinf",
-            "tanf",
-            "atan2f",
-            "expf",
-            "logf",
-            "ldexpf",
-            "copysignf",
-            "truncf",
-            "floorf",
-            "ceilf",
-            "roundf",
-            "sincosf",
-            "asinf",
-            "acosf",
-            "atanf",
-            "sinhf",
-            "coshf",
-            "tanhf",
-            "asinhf",
-            "acoshf",
-            "atanhf",
-            "exp2f",
-            "log2f",
-            "exp10f",
-            "log10f",
-            "powf",
-            "powintf",
-            "hypotf",
-            "cbrtf",
-            "fmodf",
-            "dremf",
-            "remainderf",
-            "remquof",
-            "expm1f",
-            "log1pf",
-            "fmaf",
+        .pico_float => switch (chip) {
+            // RP2040: wrap everything (ROM-based implementations)
+            .rp2040 => &.{
+                // AEABI arithmetic
+                "__aeabi_fadd",
+                "__aeabi_fdiv",
+                "__aeabi_fmul",
+                "__aeabi_frsub",
+                "__aeabi_fsub",
+                // AEABI compare
+                "__aeabi_cfcmpeq",
+                "__aeabi_cfrcmple",
+                "__aeabi_cfcmple",
+                "__aeabi_fcmpeq",
+                "__aeabi_fcmplt",
+                "__aeabi_fcmple",
+                "__aeabi_fcmpge",
+                "__aeabi_fcmpgt",
+                "__aeabi_fcmpun",
+                // AEABI conversions (32-bit)
+                "__aeabi_i2f",
+                "__aeabi_ui2f",
+                "__aeabi_f2iz",
+                "__aeabi_f2uiz",
+                // AEABI conversions (64-bit)
+                "__aeabi_l2f",
+                "__aeabi_ul2f",
+                "__aeabi_f2lz",
+                "__aeabi_f2ulz",
+                // AEABI float-to-double
+                "__aeabi_f2d",
+                // Math functions
+                "sqrtf",
+                "cosf",
+                "sinf",
+                "tanf",
+                "atan2f",
+                "expf",
+                "logf",
+                "ldexpf",
+                "copysignf",
+                "truncf",
+                "floorf",
+                "ceilf",
+                "roundf",
+                "sincosf",
+                "asinf",
+                "acosf",
+                "atanf",
+                "sinhf",
+                "coshf",
+                "tanhf",
+                "asinhf",
+                "acoshf",
+                "atanhf",
+                "exp2f",
+                "log2f",
+                "exp10f",
+                "log10f",
+                "powf",
+                "powintf",
+                "hypotf",
+                "cbrtf",
+                "fmodf",
+                "dremf",
+                "remainderf",
+                "remquof",
+                "expm1f",
+                "log1pf",
+                "fmaf",
+            },
+            // RP2350 ARM: VFP-based, wrap conversions and SCI functions
+            // We provide VFP-based implementations for these
+            .rp2350 => &.{
+                // AEABI conversions (64-bit only - we have optimized M33 versions)
+                "__aeabi_l2f",
+                "__aeabi_ul2f",
+                "__aeabi_f2lz",
+                "__aeabi_f2ulz",
+                // SCI functions (optimized VFP versions)
+                "cosf",
+                "sinf",
+                "tanf",
+                "atan2f",
+                "expf",
+                "logf",
+                "sincosf",
+                // SCI_EXTRA functions
+                "ldexpf",
+                "copysignf",
+                "truncf",
+                "floorf",
+                "ceilf",
+                "roundf",
+                "asinf",
+                "acosf",
+                "atanf",
+                "sinhf",
+                "coshf",
+                "tanhf",
+                "asinhf",
+                "acoshf",
+                "atanhf",
+                "exp2f",
+                "log2f",
+                "exp10f",
+                "log10f",
+                "powf",
+                "powintf",
+                "hypotf",
+                "cbrtf",
+                "fmodf",
+                "dremf",
+                "remainderf",
+                "remquof",
+                "expm1f",
+                "log1pf",
+                "fmaf",
+            },
         },
         .pico_double => &.{
             // AEABI arithmetic
