@@ -687,10 +687,12 @@ pub fn getTarget(chip: Chip, cpu_arch: CpuArch) std.Target.Query {
                 .cpu_arch = .thumb,
                 .cpu_model = .{ .explicit = &std.Target.arm.cpu.cortex_m33 },
                 .os_tag = .freestanding,
-                .abi = .eabihf, // Hard-float ABI: floats passed in VFP registers
+                .abi = .eabi, // Soft-float ABI (softfp): floats passed in integer registers
                 // Enable FPv5-SP-D16 (single-precision FPU with 16 d-registers)
-                // This matches CMake's -mfpu=fpv5-sp-d16 and allows the compiler
-                // to emit VFP instructions directly for float operations
+                // With eabi + VFP features, this is equivalent to CMake's:
+                //   -mfloat-abi=softfp -mfpu=fpv5-sp-d16
+                // The compiler can emit VFP instructions for computation,
+                // but arguments are passed in integer registers (required by SDK assembly)
                 .cpu_features_add = std.Target.arm.featureSet(&.{.fp_armv8d16sp}),
             },
             .riscv => .{
