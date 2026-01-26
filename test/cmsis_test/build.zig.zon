@@ -1,0 +1,9 @@
+.{
+    .name = .cmsis_test,
+    .version = "0.0.0",
+    .fingerprint = 0x8649a8d652bbafbe,
+    .dependencies = .{
+        .pico_sdk = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}

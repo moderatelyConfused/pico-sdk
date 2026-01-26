@@ -1,0 +1,9 @@
+.{
+    .name = .hardware_pwm_test,
+    .version = "0.0.0",
+    .fingerprint = 0xca0ef495d3524a70,
+    .dependencies = .{
+        .pico_sdk = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}

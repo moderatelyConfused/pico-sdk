@@ -1,0 +1,9 @@
+.{
+    .name = .pico_sem_test,
+    .version = "0.0.0",
+    .fingerprint = 0x48095d436e1663f5,
+    .dependencies = .{
+        .pico_sdk = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}

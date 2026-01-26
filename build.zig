@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
         .rp2040 => "pico",
         .rp2350 => "pico2",
     };
+    const build_tests = b.option(bool, "tests", "Build SDK tests") orelse false;
 
     const target_query = getTarget(chip, cpu_arch);
     const target = b.resolveTargetQuery(target_query);
@@ -68,6 +69,73 @@ pub fn build(b: *std.Build) void {
     // Create an example/test library to verify the build works
     const example_lib = createExampleLibrary(b, target, optimize, chip, board, generated);
     b.installArtifact(example_lib);
+
+    // Build tests if requested
+    if (build_tests) {
+        const tests_step = b.step("tests", "Build all SDK tests");
+        buildTestSubprojects(b, tests_step, chip, cpu_arch, board, optimize);
+        b.getInstallStep().dependOn(tests_step);
+    }
+}
+
+/// Test definitions for the top-level test runner
+const TestSubproject = struct {
+    name: []const u8,
+    dir: []const u8,
+    chip_filter: ChipFilter = .any,
+    cpu_arch_filter: CpuArchFilter = .any,
+    /// Extra args to pass to zig build (e.g., "-Dstdio=usb")
+    extra_args: []const []const u8 = &.{},
+};
+
+const test_subprojects: []const TestSubproject = &.{
+    .{ .name = "pico_stdlib_test", .dir = "test/pico_stdlib_test" },
+    .{ .name = "pico_stdio_test_uart", .dir = "test/pico_stdio_test", .extra_args = &.{"-Dstdio=uart"} },
+    .{ .name = "pico_stdio_test_usb", .dir = "test/pico_stdio_test", .extra_args = &.{"-Dstdio=usb"} },
+    .{ .name = "pico_sem_test", .dir = "test/pico_sem_test" },
+    .{ .name = "hardware_irq_test", .dir = "test/hardware_irq_test" },
+    .{ .name = "hardware_pwm_test", .dir = "test/hardware_pwm_test" },
+    .{ .name = "hardware_sync_spin_lock_test", .dir = "test/hardware_sync_spin_lock_test" },
+    .{ .name = "cmsis_test", .dir = "test/cmsis_test", .cpu_arch_filter = .arm_only },
+    // pico_divider_test excluded: LLVM's integrated assembler doesn't emit literal pools
+    // for inline asm `ldr rx, =constant` pseudo-instructions in naked functions correctly.
+    // GCC handles this, but LLVM places the literal pool too far from the load instruction.
+    // Workarounds like -fno-integrated-as don't work on Cortex-M0+ (Thumb-only arch).
+    // .{ .name = "pico_divider_test", .dir = "test/pico_divider_test", .chip_filter = .rp2040_only },
+    .{ .name = "pico_sha256_test", .dir = "test/pico_sha256_test", .chip_filter = .rp2350_only },
+    .{ .name = "pico_float_test", .dir = "test/pico_float_test", .cpu_arch_filter = .arm_only },
+};
+
+fn buildTestSubprojects(
+    b: *std.Build,
+    tests_step: *std.Build.Step,
+    chip: Chip,
+    cpu_arch: CpuArch,
+    board: []const u8,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    for (test_subprojects) |test_proj| {
+        // Check chip/arch filters
+        if (!test_proj.chip_filter.matches(chip)) continue;
+        if (!test_proj.cpu_arch_filter.matches(cpu_arch)) continue;
+
+        // Build args for zig build
+        const run_build = b.addSystemCommand(&.{"zig", "build"});
+        run_build.addArgs(&.{
+            b.fmt("-Dchip={s}", .{@tagName(chip)}),
+            b.fmt("-Dcpu_arch={s}", .{@tagName(cpu_arch)}),
+            b.fmt("-Dboard={s}", .{board}),
+            b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+        });
+
+        // Add test-specific extra args
+        for (test_proj.extra_args) |arg| {
+            run_build.addArg(arg);
+        }
+
+        run_build.setCwd(b.path(test_proj.dir));
+        tests_step.dependOn(&run_build.step);
+    }
 }
 
 fn generateConfigHeaders(b: *std.Build, chip: Chip, board: []const u8) std.Build.LazyPath {
@@ -492,6 +560,19 @@ pub fn setLinkerScriptWithWrapping(
         for (aliases) |alias| {
             symbol_aliases.append(b.allocator, alias) catch @panic("OOM");
         }
+    }
+
+    // Add picolibc crt0 compatibility aliases - map picolibc symbol names to pico-sdk names
+    const picolibc_aliases: []const SymbolAlias = &.{
+        .{ .name = "__data_start", .target = "__data_start__" },
+        .{ .name = "__data_source", .target = "__etext" },
+        .{ .name = "__data_size", .target = "__data_end__ - __data_start__" },
+        .{ .name = "__bss_start", .target = "__bss_start__" },
+        .{ .name = "__bss_size", .target = "__bss_end__ - __bss_start__" },
+        .{ .name = "__interrupt_vector", .target = "__VECTOR_TABLE" },
+    };
+    for (picolibc_aliases) |alias| {
+        symbol_aliases.append(b.allocator, alias) catch @panic("OOM");
     }
 
     const transform_step = LinkerScriptTransform.create(
@@ -1499,6 +1580,79 @@ pub fn addTinyUSB(
     return lib;
 }
 
+/// Enable USB stdio for an executable.
+/// This is equivalent to CMake's `pico_enable_stdio_usb(target ENABLED)`.
+///
+/// This function:
+/// - Adds the pico_stdio_usb component sources
+/// - Builds and links the TinyUSB library
+/// - Sets up necessary compile definitions (CFG_TUSB_OS, PICO_STDIO_USB, etc.)
+/// - Adds required dependency components (unique_id, flash, dma)
+///
+/// Example usage:
+/// ```zig
+/// // Create your executable
+/// const exe = b.addExecutable(.{ ... });
+///
+/// // Add basic SDK support
+/// pico_sdk.addTo(sdk_dep, exe, chip, board);
+/// pico_sdk.addComponents(sdk_dep, exe, chip, .arm, &.{
+///     .pico_stdlib,
+///     // ... other components
+/// });
+///
+/// // Enable USB stdio
+/// pico_sdk.enableUSBStdio(sdk_dep, exe, .{
+///     .chip = chip,
+///     .cpu_arch = .arm,
+/// });
+/// ```
+pub fn enableUSBStdio(
+    sdk_dep: *std.Build.Dependency,
+    compile: *std.Build.Step.Compile,
+    options: struct {
+        chip: Chip,
+        cpu_arch: CpuArch = .arm,
+        board: []const u8 = "pico",
+    },
+) void {
+    const b = sdk_dep.builder;
+
+    // Add pico_stdio_usb sources
+    addComponent(sdk_dep, compile, options.chip, options.cpu_arch, .pico_stdio_usb);
+
+    // Build and link TinyUSB
+    const tinyusb_lib = addTinyUSB(sdk_dep, .{
+        .target = compile.root_module.resolved_target.?,
+        .optimize = compile.root_module.optimize.?,
+        .chip = options.chip,
+        .board = options.board,
+        .mode = .device,
+        .cdc = true,
+        .vendor = true, // Needed for reset interface
+    });
+    compile.linkLibrary(tinyusb_lib);
+
+    // Add TinyUSB include path to the exe so it can find tusb.h
+    if (b.lazyDependency("tinyusb", .{})) |tinyusb_dep| {
+        compile.addSystemIncludePath(tinyusb_dep.path("src"));
+    }
+
+    // Set TinyUSB OS to pico - this causes osal_pico.h to be included which
+    // provides pico/critical_section.h needed by stdio_usb.c's IRQ background task
+    compile.root_module.addCMacro("CFG_TUSB_OS", "OPT_OS_PICO");
+    compile.root_module.addCMacro("PICO_STDIO_USB", "1");
+    compile.root_module.addCMacro("LIB_PICO_STDIO_USB", "1");
+
+    // Add required dependency components
+    addComponent(sdk_dep, compile, options.chip, options.cpu_arch, .hardware_dma);
+    addComponent(sdk_dep, compile, options.chip, options.cpu_arch, .pico_unique_id);
+    addComponent(sdk_dep, compile, options.chip, options.cpu_arch, .hardware_flash);
+    if (options.chip == .rp2350) {
+        addComponent(sdk_dep, compile, options.chip, options.cpu_arch, .hardware_xip_cache);
+    }
+}
+
 /// Get the picolibc library for linking.
 /// This provides a full C library implementation (malloc, printf internals, etc.)
 /// that integrates with the pico-sdk runtime.
@@ -2242,4 +2396,60 @@ fn getComponentSources(chip: Chip, cpu_arch: CpuArch, component: Component) []co
             .rp2350 => &.{}, // Not needed on RP2350
         },
     };
+}
+
+// ============================================================================
+// Test Support
+// ============================================================================
+
+/// Stdio backend configuration for tests
+pub const StdioConfig = struct {
+    uart: bool = false,
+    usb: bool = false,
+    rtt: bool = false,
+    semihosting: bool = false,
+};
+
+/// Chip filter for test applicability
+pub const ChipFilter = enum {
+    rp2040_only,
+    rp2350_only,
+    any,
+
+    pub fn matches(self: ChipFilter, chip: Chip) bool {
+        return switch (self) {
+            .rp2040_only => chip == .rp2040,
+            .rp2350_only => chip == .rp2350,
+            .any => true,
+        };
+    }
+};
+
+/// CPU architecture filter for test applicability
+pub const CpuArchFilter = enum {
+    arm_only,
+    riscv_only,
+    any,
+
+    pub fn matches(self: CpuArchFilter, cpu_arch: CpuArch) bool {
+        return switch (self) {
+            .arm_only => cpu_arch == .arm,
+            .riscv_only => cpu_arch == .riscv,
+            .any => true,
+        };
+    }
+};
+
+/// Configure stdio backends on a compile step.
+/// Sets PICO_STDIO_UART, PICO_STDIO_USB, etc. definitions.
+pub fn configureStdio(compile: *std.Build.Step.Compile, config: StdioConfig) void {
+    compile.root_module.addCMacro("PICO_STDIO_UART", if (config.uart) "1" else "0");
+    compile.root_module.addCMacro("PICO_STDIO_USB", if (config.usb) "1" else "0");
+    compile.root_module.addCMacro("PICO_STDIO_RTT", if (config.rtt) "1" else "0");
+    compile.root_module.addCMacro("PICO_STDIO_SEMIHOSTING", if (config.semihosting) "1" else "0");
+
+    // Enable USB-specific definitions
+    if (config.usb) {
+        compile.root_module.addCMacro("LIB_PICO_STDIO_USB", "1");
+    }
 }

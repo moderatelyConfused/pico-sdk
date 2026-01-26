@@ -1,0 +1,9 @@
+.{
+    .name = .hardware_irq_test,
+    .version = "0.0.0",
+    .fingerprint = 0x8fd633d2bc6ca298,
+    .dependencies = .{
+        .pico_sdk = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}

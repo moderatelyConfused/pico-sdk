@@ -1,0 +1,9 @@
+.{
+    .name = .hardware_sync_spin_lock_test,
+    .version = "0.0.0",
+    .fingerprint = 0xc317862ac8eba959,
+    .dependencies = .{
+        .pico_sdk = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}
