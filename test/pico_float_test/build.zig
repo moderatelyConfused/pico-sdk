@@ -15,8 +15,34 @@ pub fn build(b: *std.Build) void {
     const sdk_dep = b.dependency("pico_sdk", .{});
     const target = b.resolveTargetQuery(pico_sdk.getTarget(chip, cpu_arch));
 
+    // Build pico_float_test
+    const float_test = buildFloatTest(b, sdk_dep, target, chip, board, optimize, usb_boot_on_exit, .float);
+    b.installArtifact(float_test);
+
+    // Build pico_double_test
+    const double_test = buildFloatTest(b, sdk_dep, target, chip, board, optimize, usb_boot_on_exit, .double);
+    b.installArtifact(double_test);
+}
+
+const TestType = enum { float, double };
+
+fn buildFloatTest(
+    b: *std.Build,
+    sdk_dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    chip: pico_sdk.Chip,
+    board: []const u8,
+    optimize: std.builtin.OptimizeMode,
+    usb_boot_on_exit: bool,
+    test_type: TestType,
+) *std.Build.Step.Compile {
+    const name = switch (test_type) {
+        .float => "pico_float_test",
+        .double => "pico_double_test",
+    };
+
     const exe = b.addExecutable(.{
-        .name = "pico_float_test",
+        .name = name,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -27,7 +53,7 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(sdk_dep.path("test/pico_test/include"));
     exe.addIncludePath(sdk_dep.path("test/pico_float_test/llvm"));
 
-    pico_sdk.addComponents(sdk_dep, exe, chip, cpu_arch, &.{
+    pico_sdk.addComponents(sdk_dep, exe, chip, .arm, &.{
         .pico_platform,
         .pico_runtime,
         .pico_runtime_init,
@@ -44,8 +70,8 @@ pub fn build(b: *std.Build) void {
         .hardware_gpio,
         .hardware_uart,
         .hardware_resets,
-        .pico_float, // test-specific
-        .pico_double, // needed for printf %g double arithmetic
+        .pico_float,
+        .pico_double,
         .pico_stdlib,
         .pico_stdio,
         .pico_stdio_uart,
@@ -56,11 +82,20 @@ pub fn build(b: *std.Build) void {
     });
 
     pico_sdk.configureStdio(exe, .{ .uart = true });
-    exe.root_module.addCMacro("LIB_PICO_PRINTF_PICO", "1");
     exe.root_module.addCMacro("PICO_STDIO_SHORT_CIRCUIT_CLIB_FUNCS", "0");
 
+    // Test-specific configuration
+    exe.root_module.addCMacro("LIB_PICO_PRINTF_PICO", "1");
+    switch (test_type) {
+        .float => {},
+        .double => {
+            // pico_double_test needs NaN propagation for correct test behavior
+            exe.root_module.addCMacro("PICO_FLOAT_PROPAGATE_NANS", "1");
+            exe.root_module.addCMacro("PICO_DOUBLE_PROPAGATE_NANS", "1");
+        },
+    }
+
     // Reboot to BOOTSEL on exit (for automated testing)
-    // Note: pico_runtime_init already includes bootrom.c which provides reset_usb_boot()
     if (usb_boot_on_exit) {
         exe.root_module.addCMacro("PICO_ENTER_USB_BOOT_ON_EXIT", "1");
     }
@@ -81,10 +116,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }));
 
-    // Disable UBSAN for this test - it intentionally tests edge cases like
-    // negative float to unsigned int conversion which is undefined behavior
+    // Add test source file - disable UBSAN as tests intentionally exercise
+    // edge cases like negative float to unsigned int conversion (undefined behavior)
+    const source_file = switch (test_type) {
+        .float => "pico_float_test.c",
+        .double => "pico_double_test.c",
+    };
     exe.addCSourceFile(.{
-        .file = b.path("pico_float_test.c"),
+        .file = b.path(source_file),
         .flags = &.{"-fno-sanitize=undefined"},
     });
     exe.addAssemblyFile(sdk_dep.path("test/pico_float_test/llvm/call_apsr.S"));
@@ -96,5 +135,5 @@ pub fn build(b: *std.Build) void {
         exe.addAssemblyFile(b.path("float_cmp_vfp.S"));
     }
 
-    b.installArtifact(exe);
+    return exe;
 }

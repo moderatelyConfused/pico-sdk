@@ -107,6 +107,7 @@ const test_subprojects: []const TestSubproject = &.{
     // .{ .name = "pico_divider_test", .dir = "test/pico_divider_test", .chip_filter = .rp2040_only },
     .{ .name = "pico_sha256_test", .dir = "test/pico_sha256_test", .chip_filter = .rp2350_only },
     .{ .name = "pico_float_test", .dir = "test/pico_float_test", .cpu_arch_filter = .arm_only },
+    .{ .name = "pico_double_test", .dir = "test/pico_float_test", .cpu_arch_filter = .arm_only },
 };
 
 fn buildTestSubprojects(
