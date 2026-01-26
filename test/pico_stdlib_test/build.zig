@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
         .rp2350 => "pico2",
     };
     const optimize = b.standardOptimizeOption(.{});
+    const usb_boot_on_exit = b.option(bool, "usb_boot_on_exit", "Reboot to BOOTSEL when test exits") orelse false;
 
     const sdk_dep = b.dependency("pico_sdk", .{});
 
@@ -64,6 +65,12 @@ pub fn build(b: *std.Build) void {
     // Enable pico_printf wrapping
     exe.root_module.addCMacro("LIB_PICO_PRINTF_PICO", "1");
     exe.root_module.addCMacro("PICO_STDIO_SHORT_CIRCUIT_CLIB_FUNCS", "0");
+
+    // Reboot to BOOTSEL on exit (for automated testing)
+    // Note: pico_runtime_init already includes bootrom.c which provides reset_usb_boot()
+    if (usb_boot_on_exit) {
+        exe.root_module.addCMacro("PICO_ENTER_USB_BOOT_ON_EXIT", "1");
+    }
 
     // Set linker script with symbol wrapping for stdio/printf
     pico_sdk.setLinkerScriptWithWrapping(sdk_dep, exe, chip, null, &.{

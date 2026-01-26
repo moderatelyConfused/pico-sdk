@@ -12,6 +12,11 @@
             .url = "git+https://github.com/moderatelyConfused/picolibc-zig#3a42c61ca8973471b82890e28e4e3025129e0f4b",
             .hash = "picolibc-1.8.6-GZw2Ok18QAE8XvLkMAWqadF0N51PqgEVh60gYpHOkvKR",
         },
+        .picotool = .{
+            .url = "git+https://github.com/moderatelyConfused/picotool#aaaa8fae6536a80510c3ad1fbc73cbdef8c669e7",
+            .hash = "picotool-2.2.0-0iITVrDBQwCRz0CZuosi0wL7c3b5ruH2miCL1569K0f-",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

@@ -282,8 +282,8 @@ static void insert_bl_32(uint16_t *from, void *to) {
 
 static inline void *resolve_j_16(uint16_t *inst) {
     assert(0x1c == (*inst)>>11u);
-    int32_t i_addr = (*inst) << 21u;
-    i_addr /= (int32_t)(1u<<21u);
+    // Cast to uint32_t first to avoid signed overflow UB, then to int32_t for arithmetic right shift
+    int32_t i_addr = (int32_t)((uint32_t)(*inst) << 21u) >> 21;
     return inst + 2 + i_addr;
 }
 

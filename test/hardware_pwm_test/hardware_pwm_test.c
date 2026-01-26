@@ -32,9 +32,9 @@ void on_pwm_wrap() {
 }
 
 int main() {
-    reset_unreset_block_num_wait_blocking(RESET_PWM);
-
     setup_default_uart();
+
+    reset_unreset_block_num_wait_blocking(RESET_PWM);
 
     PICOTEST_START();
 
@@ -133,6 +133,7 @@ int main() {
     PICOTEST_END_SECTION();
 
     PICOTEST_START_SECTION("PWM IRQ tests");
+        printf("PWM test: setting up IRQ handler\n");
 
         irq_set_exclusive_handler(PWM_DEFAULT_IRQ_NUM(), on_pwm_wrap);
         irq_set_enabled(PWM_DEFAULT_IRQ_NUM(), true);
@@ -143,6 +144,7 @@ int main() {
         // This give about 40 per second on Picoboard
         pwm_config_set_clkdiv(&config, 50);
 
+        printf("PWM test: initializing %d slices\n", NUM_PWM_SLICES);
         for (int pwm = 0; pwm < NUM_PWM_SLICES; pwm++) {
             pwm_init(pwm, &config, false);
             pwm_clear_irq(pwm);
@@ -150,8 +152,10 @@ int main() {
         }
 
         // Now enable all the PWM at the same time.
+        printf("PWM test: enabling PWMs and sleeping 1 second\n");
         pwm_set_mask_enabled((1 << NUM_PWM_SLICES) - 1);
         sleep_ms(1000);
+        printf("PWM test: sleep complete\n");
 
         int err = 0;
 

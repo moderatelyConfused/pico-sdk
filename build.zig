@@ -47,8 +47,6 @@ pub fn build(b: *std.Build) void {
         .rp2040 => "pico",
         .rp2350 => "pico2",
     };
-    const build_tests = b.option(bool, "tests", "Build SDK tests") orelse false;
-
     const target_query = getTarget(chip, cpu_arch);
     const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
@@ -70,12 +68,13 @@ pub fn build(b: *std.Build) void {
     const example_lib = createExampleLibrary(b, target, optimize, chip, board, generated);
     b.installArtifact(example_lib);
 
-    // Build tests if requested
-    if (build_tests) {
-        const tests_step = b.step("tests", "Build all SDK tests");
-        buildTestSubprojects(b, tests_step, chip, cpu_arch, board, optimize);
-        b.getInstallStep().dependOn(tests_step);
-    }
+    // Device tests step - build SDK tests for target chip
+    const tests_step = b.step("tests", "Build all SDK tests for target chip");
+    buildTestSubprojects(b, tests_step, chip, cpu_arch, board, optimize);
+
+    // Run tests step - build tests, upload to device via picotool, and run
+    const run_tests_step = b.step("run-tests", "Build and run SDK tests on attached device");
+    buildAndRunTestsOnDevice(b, run_tests_step, chip, cpu_arch, board, optimize);
 
     // Host tests step - build and run tests on development machine
     const host_tests_step = b.step("host-tests", "Build and run host-compatible SDK tests");
@@ -139,6 +138,75 @@ fn buildTestSubprojects(
 
         run_build.setCwd(b.path(test_proj.dir));
         tests_step.dependOn(&run_build.step);
+    }
+}
+
+fn buildAndRunTestsOnDevice(
+    b: *std.Build,
+    run_tests_step: *std.Build.Step,
+    chip: Chip,
+    cpu_arch: CpuArch,
+    board: []const u8,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    // Get picotool from lazy dependency
+    const picotool_dep = b.lazyDependency("picotool", .{}) orelse return;
+    const picotool = picotool_dep.artifact("picotool");
+
+    // Optional: run a specific test only
+    const test_filter = b.option([]const u8, "test", "Run a specific test (e.g., pico_stdlib_test)");
+
+    var prev_step: ?*std.Build.Step = null;
+
+    for (test_subprojects) |test_proj| {
+        // Check chip/arch filters
+        if (!test_proj.chip_filter.matches(chip)) continue;
+        if (!test_proj.cpu_arch_filter.matches(cpu_arch)) continue;
+
+        // Skip USB tests for automated runs (need manual intervention)
+        if (std.mem.indexOf(u8, test_proj.name, "usb") != null) continue;
+
+        // If a test filter is specified, only run that test
+        if (test_filter) |filter| {
+            if (!std.mem.eql(u8, test_proj.name, filter)) continue;
+        }
+
+        // Build the test with PICO_ENTER_USB_BOOT_ON_EXIT so it reboots to BOOTSEL when done
+        const run_build = b.addSystemCommand(&.{"zig", "build"});
+        run_build.addArgs(&.{
+            b.fmt("-Dchip={s}", .{@tagName(chip)}),
+            b.fmt("-Dcpu_arch={s}", .{@tagName(cpu_arch)}),
+            b.fmt("-Dboard={s}", .{board}),
+            b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+            "-Dusb_boot_on_exit=true",
+        });
+        for (test_proj.extra_args) |arg| {
+            run_build.addArg(arg);
+        }
+        run_build.setCwd(b.path(test_proj.dir));
+
+        // Chain tests sequentially
+        if (prev_step) |ps| {
+            run_build.step.dependOn(ps);
+        }
+
+        // Get the built ELF path
+        const elf_path = b.fmt("{s}/zig-out/bin/{s}", .{ test_proj.dir, test_proj.name });
+
+        // Use picotool to load and run the test
+        const load_cmd = b.addRunArtifact(picotool);
+        load_cmd.addArgs(&.{ "load", "-x", "-f", "-t", "elf" });
+        load_cmd.addFileArg(b.path(elf_path));
+        load_cmd.step.dependOn(&run_build.step);
+
+        // Wait for the test to complete and device to reboot to BOOTSEL
+        // pico_stdlib_test takes ~10 seconds for its timing loops
+        // Allow 45 seconds for test execution and reboot
+        const wait_cmd = b.addSystemCommand(&.{ "sleep", "45" });
+        wait_cmd.step.dependOn(&load_cmd.step);
+
+        prev_step = &wait_cmd.step;
+        run_tests_step.dependOn(&wait_cmd.step);
     }
 }
 
@@ -2623,8 +2691,21 @@ pub fn configureStdio(compile: *std.Build.Step.Compile, config: StdioConfig) voi
     compile.root_module.addCMacro("PICO_STDIO_RTT", if (config.rtt) "1" else "0");
     compile.root_module.addCMacro("PICO_STDIO_SEMIHOSTING", if (config.semihosting) "1" else "0");
 
-    // Enable USB-specific definitions
+    // Enable library-specific definitions (LIB_* macros enable the actual code paths)
+    // LIB_PICO_STDIO is needed by picolibc_interface.c to enable stdio_putchar/getchar calls
+    if (config.uart or config.usb or config.semihosting or config.rtt) {
+        compile.root_module.addCMacro("LIB_PICO_STDIO", "1");
+    }
+    if (config.uart) {
+        compile.root_module.addCMacro("LIB_PICO_STDIO_UART", "1");
+    }
     if (config.usb) {
         compile.root_module.addCMacro("LIB_PICO_STDIO_USB", "1");
+    }
+    if (config.semihosting) {
+        compile.root_module.addCMacro("LIB_PICO_STDIO_SEMIHOSTING", "1");
+    }
+    if (config.rtt) {
+        compile.root_module.addCMacro("LIB_PICO_STDIO_RTT", "1");
     }
 }

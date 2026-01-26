@@ -14,8 +14,13 @@
 #include <stdlib.h>
 
 void test_builtin_bitops() {
-    int32_t x = 0;
+    // Use int64_t to avoid signed integer overflow (UBSAN trap)
+    // The __rev() results can be large negative numbers when cast to int32_t
+    int64_t x = 0;
     for (uint32_t i = 0; i < 10000; i++) {
+        if (i % 1000 == 0) {
+            printf("  iteration %u\n", (unsigned)i);
+        }
         uint32_t vals32[] = {
                 i,
                 1u << (i & 31u),
@@ -30,40 +35,35 @@ void test_builtin_bitops() {
             x += __builtin_popcount(vals32[j]);
             x += __builtin_popcountl(vals32[j]);
             x += (int32_t)__rev(vals32[j]);
-#if !PICO_ON_DEVICE
-            // the following functions are undefined on host mode, but on RP2040 we return 32
+            // clz/ctz on 0 is undefined behavior - compiler-rt may infinite loop
             if (vals32[j]) {
                 x += __builtin_clz(vals32[j]);
                 x += __builtin_ctz(vals32[j]);
-            } else {
-                x += 64;
-            }
-#else
-            x += __builtin_clz(vals32[j]);
-            x += __builtin_ctz(vals32[j]);
-            // check l variants are the same
-            if (__builtin_clz(vals32[j]) != __builtin_clzl(vals32[j])) x += 17;
-            if (__builtin_ctz(vals32[j]) != __builtin_ctzl(vals32[j])) x += 23;
+#if PICO_ON_DEVICE
+                // check l variants are the same
+                if (__builtin_clz(vals32[j]) != __builtin_clzl(vals32[j])) x += 17;
+                if (__builtin_ctz(vals32[j]) != __builtin_ctzl(vals32[j])) x += 23;
 #endif
+            } else {
+                x += 64; // clz(0) + ctz(0) = 32 + 32
+            }
         }
         for(int j=0; j<count_of(vals64); j++) {
             x += __builtin_popcountll(vals64[j]);
             x += (int32_t)__revll(vals64[j]);
-#if !PICO_ON_DEVICE
-            // the following functions are undefined on host mode, but on RP2040 we return 64
-            if (!vals64[j]) {
-                x += 128;
-                continue;
+            // clzll/ctzll on 0 is undefined behavior - compiler-rt may infinite loop
+            if (vals64[j]) {
+                x += __builtin_clzll(vals64[j]);
+                x += __builtin_ctzll(vals64[j]);
+            } else {
+                x += 128; // clzll(0) + ctzll(0) = 64 + 64
             }
-#endif
-            x += __builtin_clzll(vals64[j]);
-            x += __builtin_ctzll(vals64[j]);
         }
     }
-    printf("Count is %d\n", (int)x);
-    int32_t expected = 1475508680;
+    printf("Count is %" PRId64 "\n", x);
+    int64_t expected = 1475508680;
     if (x != expected) {
-        printf("FAILED (expected count %d\n", (int) expected);
+        printf("FAILED (expected count %" PRId64 ")\n", expected);
         exit(1);
     }
 }
