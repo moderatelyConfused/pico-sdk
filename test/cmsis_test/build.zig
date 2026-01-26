@@ -56,6 +56,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCMacro("LIB_PICO_PRINTF_PICO", "1");
     exe.root_module.addCMacro("PICO_STDIO_SHORT_CIRCUIT_CLIB_FUNCS", "0");
 
+    // Enable CMSIS exception renaming (isr_pendsv -> PendSV_Handler, etc.)
+    exe.root_module.addCMacro("LIB_CMSIS_CORE", "1");
+
     // Reboot to BOOTSEL on exit (for automated testing)
     // Note: pico_runtime_init already includes bootrom.c which provides reset_usb_boot()
     if (usb_boot_on_exit) {
