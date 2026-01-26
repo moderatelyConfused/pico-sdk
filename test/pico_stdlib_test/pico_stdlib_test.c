@@ -81,7 +81,7 @@ int main() {
 #endif
 
     for (int i = 0; i < 64; i++) {
-        uint32_t x = 1 << i;
+        uint32_t x = (i < 32) ? (1u << i) : 0;
         uint64_t xl = 1ull << i;
 //        printf("%d %u %u %u %u \n", i, (uint)(x%10u), (uint)(x%16u), (uint)(xl %10u), (uint)(xl%16u));
         printf("%08x %08x %016llx %016llx\n", (uint) x, (uint) __rev(x), (unsigned long long) xl,
