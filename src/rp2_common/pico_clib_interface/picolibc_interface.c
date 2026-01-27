@@ -24,6 +24,11 @@
 #include "pico/time.h"
 #include "pico/runtime_init.h"
 
+// For early EXTEXCLALL setup on RP2350
+#if PICO_RP2350 && __ARM_ARCH_8M_MAIN__
+#include "hardware/structs/m33.h"
+#endif
+
 #if LIB_PICO_PRINTF_PICO
 #include "pico/printf.h"
 #else
@@ -122,6 +127,14 @@ void runtime_init(void) {
     // install core0 stack guard
     extern char __StackBottom;
     runtime_init_per_core_install_stack_guard(&__StackBottom);
+#endif
+
+    // On RP2350 ARM, set EXTEXCLALL early so that software spin locks work
+    // during preinit_array processing. The normal spinlock_set_extexclall runs
+    // as a per-core init (priority ZZZZZ.01000) which may not be linked correctly
+    // in Zig builds, causing spin lock hangs before EXTEXCLALL is set.
+#if PICO_RP2350 && __ARM_ARCH_8M_MAIN__
+    m33_hw->actlr |= M33_ACTLR_EXTEXCLALL_BITS;
 #endif
 
     // piolibc __libc_init_array does __preint_array and __init_array

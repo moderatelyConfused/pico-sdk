@@ -1,0 +1,12 @@
+.{
+    .name = .pico_time_test,
+    .version = "0.0.0",
+    .fingerprint = 0xf5867878d04430b7,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+    .dependencies = .{
+        .pico_sdk = .{ .path = "../.." },
+    },
+}

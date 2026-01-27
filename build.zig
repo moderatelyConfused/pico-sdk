@@ -89,12 +89,16 @@ const TestSubproject = struct {
     cpu_arch_filter: CpuArchFilter = .any,
     /// Extra args to pass to zig build (e.g., "-Dstdio=usb")
     extra_args: []const []const u8 = &.{},
+    /// Override the optimization level for this test (e.g., tests with strict timing requirements)
+    optimize_override: ?std.builtin.OptimizeMode = null,
 };
 
 const test_subprojects: []const TestSubproject = &.{
     .{ .name = "pico_stdlib_test", .dir = "test/pico_stdlib_test" },
     .{ .name = "pico_stdio_test_uart", .dir = "test/pico_stdio_test", .extra_args = &.{"-Dstdio=uart"} },
     .{ .name = "pico_stdio_test_usb", .dir = "test/pico_stdio_test", .extra_args = &.{"-Dstdio=usb"} },
+    // pico_time_test requires ReleaseFast - Debug build has too much overhead causing 30ms+ jitter
+    .{ .name = "pico_time_test", .dir = "test/pico_time_test", .optimize_override = .ReleaseFast },
     .{ .name = "pico_sem_test", .dir = "test/pico_sem_test" },
     .{ .name = "hardware_irq_test", .dir = "test/hardware_irq_test" },
     .{ .name = "hardware_pwm_test", .dir = "test/hardware_pwm_test" },
@@ -123,13 +127,16 @@ fn buildTestSubprojects(
         if (!test_proj.chip_filter.matches(chip)) continue;
         if (!test_proj.cpu_arch_filter.matches(cpu_arch)) continue;
 
+        // Use test-specific optimize override if specified
+        const effective_optimize = test_proj.optimize_override orelse optimize;
+
         // Build args for zig build
         const run_build = b.addSystemCommand(&.{ "zig", "build" });
         run_build.addArgs(&.{
             b.fmt("-Dchip={s}", .{@tagName(chip)}),
             b.fmt("-Dcpu_arch={s}", .{@tagName(cpu_arch)}),
             b.fmt("-Dboard={s}", .{board}),
-            b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+            b.fmt("-Doptimize={s}", .{@tagName(effective_optimize)}),
         });
 
         // Add test-specific extra args
@@ -172,13 +179,16 @@ fn buildAndRunTestsOnDevice(
             if (!std.mem.eql(u8, test_proj.name, filter)) continue;
         }
 
+        // Use test-specific optimize override if specified
+        const effective_optimize = test_proj.optimize_override orelse optimize;
+
         // Build the test with PICO_ENTER_USB_BOOT_ON_EXIT so it reboots to BOOTSEL when done
         const run_build = b.addSystemCommand(&.{ "zig", "build" });
         run_build.addArgs(&.{
             b.fmt("-Dchip={s}", .{@tagName(chip)}),
             b.fmt("-Dcpu_arch={s}", .{@tagName(cpu_arch)}),
             b.fmt("-Dboard={s}", .{board}),
-            b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+            b.fmt("-Doptimize={s}", .{@tagName(effective_optimize)}),
             "-Dusb_boot_on_exit=true",
         });
         for (test_proj.extra_args) |arg| {
@@ -1539,6 +1549,7 @@ const sdk_c_flags: []const []const u8 = &.{
     "-fdata-sections",
     "-fno-strict-aliasing",
     "-ffreestanding",
+    "-fno-sanitize=undefined", // Disable UBSAN - SDK code has intentional overflow patterns
     "-D__always_inline=__attribute__((__always_inline__)) inline",
     // Note: __printflike is defined by picolibc's sys/cdefs.h
     "-Dstatic_assert=_Static_assert",

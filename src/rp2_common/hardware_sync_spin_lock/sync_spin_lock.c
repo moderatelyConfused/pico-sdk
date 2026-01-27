@@ -19,7 +19,11 @@ spin_lock_t *spin_lock_init(uint lock_num) {
 }
 
 #if PICO_USE_SW_SPIN_LOCKS
-spin_lock_t _sw_spin_locks[NUM_SPIN_LOCKS];
+// Alignment is required for ARM exclusive access (ldaexb/strexb) to work correctly
+// with the global exclusive monitor when EXTEXCLALL is set. Without alignment,
+// linkers may place this array at an odd address which can cause exclusive
+// accesses to fail spuriously.
+spin_lock_t _sw_spin_locks[NUM_SPIN_LOCKS] __attribute__((aligned(4)));
 
 #if __ARM_ARCH_8M_MAIN__ && !PICO_SW_SPIN_LOCKS_NO_EXTEXCLALL
 #include "pico/runtime_init.h"

@@ -9,8 +9,8 @@
             .hash = "N-V-__8AAGUZ_gDYqxEdexw7Rfp9YENlWbwlDPQu0bCfKxws",
         },
         .picolibc = .{
-            .url = "git+https://github.com/moderatelyConfused/picolibc-zig#3a42c61ca8973471b82890e28e4e3025129e0f4b",
-            .hash = "picolibc-1.8.6-GZw2Ok18QAE8XvLkMAWqadF0N51PqgEVh60gYpHOkvKR",
+            .url = "git+https://github.com/moderatelyConfused/picolibc-zig#f49afe639793cc79d1d23733f928e5de31e4d8c0",
+            .hash = "picolibc-1.8.6-GZw2Os58QAGQMcVX4NskTh9BToZX9l2o3JcyMd3itYhq",
         },
         .picotool = .{
             .url = "git+https://github.com/moderatelyConfused/picotool#aaaa8fae6536a80510c3ad1fbc73cbdef8c669e7",
